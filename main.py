@@ -115,21 +115,34 @@ class Project(PyironProject):
                 self.set_input(job)
                 job.run()
 
-    def get_init_hessian_mag(self, pr=None):
+    def get_output(self, job_list, pr=None, shape=None):
         if pr is None:
             pr = self
         output = defaultdict(list)
-        for mag in self.magmom_magnitudes:
-            for ii in range(self.n_copy):
-                job = pr.load(('spx_v', self.structure, mag, ii, 0))
-                output['energy'].append(job.output.energy_pot[-1])
-                output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
-                output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
-                output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
-                output['forces'].append(job['output/generic/forces'][0])
-        output['magmoms'] = np.array(output['magmoms']).reshape(2, self.n_copy, -1)
-        output['nu'] = np.array(output['nu']).reshape(2, self.n_copy, -1)
-        output['forces'] = np.array(output['forces']).reshape(2, self.n_copy, -1, 3)
+        for job_name in job_list:
+            job = pr.load(job_name)
+            output['energy'].append(job.output.energy_pot[-1])
+            output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
+            output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
+            output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
+            output['forces'].append(job['output/generic/forces'][0])
+            output['positions'].append(job['output/generic/positions'][0])
+        if shape is not None:
+            output['magmoms'] = np.array(output['magmoms']).reshape(shape + (-1,))
+            output['nu'] = np.array(output['nu']).reshape(shape + (-1,))
+            output['forces'] = np.array(output['forces']).reshape(shape + (-1, 3,))
+            output['positions'] = np.array(output['positions']).reshape(shape + (-1, 3,))
+        return output
+
+    def get_init_hessian_mag(self, pr=None):
+        job_lst = [
+            ('spx_v', self.structure, mag, ii, 0)
+            for mag in self.magmom_magnitudes
+            for ii in range(self.n_copy)
+        ]
+        output = self.get_output(
+            job_lst, pr=pr, shape=(len(self.magmom_magnitudes), self.n_copy)
+        )
         self.set_initial_H_mag(output['nu'], output['magmoms'])
 
     def update_hessian(self, magnetic_forces, magmoms, positions, forces, n_cycle):
@@ -142,7 +155,7 @@ class Project(PyironProject):
             for f in forces.mean(axis=1)
         ]).reshape(n_cycle, -1)
         x_diff = np.diff(positions, axis=0)
-        x_diff = structure.find_mic(x_diff).reshape(n_cycle - 1, -1)
+        x_diff = self.structure.find_mic(x_diff).reshape(n_cycle - 1, -1)
         x_diff = np.append(
             x_diff, np.diff(np.absolute(magmoms).mean(axis=1), axis=0), axis=1
         )
@@ -172,7 +185,7 @@ class Project(PyironProject):
             if magmoms is None:
                 raise ValueError('when symmetrize is on magmoms is required')
             magnetic_forces = np.mean([
-                nu[self.symmetrize.permutations]
+                nu[self.symmetry.permutations]
                 for nu in np.mean(magnetic_forces * np.sign(magmoms), axis=1)
             ], axis=1)
             forces = self.symmetry.symmetrize_vectors(forces.mean(axis=0))
