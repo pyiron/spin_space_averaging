@@ -1,14 +1,13 @@
 from pyiron_atomistics import Project as PyironProject
 import numpy as np
-import matplotlib.pylab as plt
 from collections import defaultdict
 from pyiron_contrib.atomistics.atomistics.job.sqs import SQS
 
 
 def get_bfgs(s, y, H):
-    dH = np.einsum('...i,...j,...->...ij', *2*[y], 1 / np.einsum('...i,...i->...', s, y))
+    dH = np.einsum('...i,...j,...->...ij', *2 * [y], 1 / np.einsum('...i,...i->...', s, y))
     dH -= np.einsum(
-        '...ij,...kl,...j,...l,...->...ik', *2*[H], *2*[s], 1 / np.einsum('...ij,...i,...j->...', H, *2 * [s]),
+        '...ij,...kl,...j,...l,...->...ik', *2 * [H], *2 * [s], 1 / np.einsum('...ij,...i,...j->...', H, *2 * [s]),
         optimize=True
     )
     return dH
@@ -109,8 +108,8 @@ class Project(PyironProject):
             raise ValueError('magmom magnitudes not defined')
         for mag in self.magmom_magnitudes:
             for ii, mm in enumerate(self.magmoms):
-                job = pr.create.job.Sphinx(('spx_v', self.structure, mag, ii, 0))
-                job.structure = structure
+                job = self.create.job.Sphinx(('spx_v', self.structure, mag, ii, 0))
+                job.structure = self.structure
                 job.structure.set_initial_magnetic_moments(mag * mm)
                 self.set_input(job)
                 job.run()
@@ -145,19 +144,24 @@ class Project(PyironProject):
         )
         self.set_initial_H_mag(output['nu'], output['magmoms'])
 
+    def symmetrize_magmoms(self, magmoms, signs=None):
+        if signs is None:
+            signs = np.sign(magmoms)
+        signs = np.sign(signs)
+        magmoms = np.reshape(magmoms, (-1, self.n_copy, len(self.structure)))
+        signs = np.reshape(signs, (-1, self.n_copy, len(self.structure)))
+        return np.mean([
+            mm[self.symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
+        ], axis=1).squeeze()
+
     def update_hessian(self, magnetic_forces, magmoms, positions, forces, n_cycle):
-        nu = np.mean([
-            nu[self.symmetry.permutations]
-            for nu in np.mean(magnetic_forces * np.sign(magmoms), axis=1)
-        ], axis=1)
-        f_sym = np.array([
-            self.symmetry.symmetrize_vectors(f)
-            for f in forces.mean(axis=1)
-        ]).reshape(n_cycle, -1)
+        nu = self.symmetrize_magmoms(magnetic_forces, magmoms)
+        magmoms = self.symmetrize_magmoms(magmoms)
+        f_sym = self.symmetry.symmetrize_vectors(forces.mean(axis=1)).reshape(n_cycle, -1)
         x_diff = np.diff(positions, axis=0)
         x_diff = self.structure.find_mic(x_diff).reshape(n_cycle - 1, -1)
         x_diff = np.append(
-            x_diff, np.diff(np.absolute(magmoms).mean(axis=1), axis=0), axis=1
+            x_diff, np.diff(magmoms, axis=0), axis=1
         )
         dUdx = np.append(-f_sym, nu, axis=1)
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
@@ -184,12 +188,9 @@ class Project(PyironProject):
         if symmetrize:
             if magmoms is None:
                 raise ValueError('when symmetrize is on magmoms is required')
-            magnetic_forces = np.mean([
-                nu[self.symmetry.permutations]
-                for nu in np.mean(magnetic_forces * np.sign(magmoms), axis=1)
-            ], axis=1)
+            magnetic_forces = self.symmetrize_magmoms(magnetic_forces, magmoms)
             forces = self.symmetry.symmetrize_vectors(forces.mean(axis=0))
-        xm_new = np.einsum('ij,j->i', np.linalg.inv(self.H_current), np.append(-forces, nu[-1]))
+        xm_new = np.einsum('ij,j->i', np.linalg.inv(self.H_current), np.append(-forces, magnetic_forces))
         dx = -xm_new[:3 * len(self.structure)].reshape(-1, 3)
         dm = -xm_new[3 * len(self.structure):]
         return dx, dm
