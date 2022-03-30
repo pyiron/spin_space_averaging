@@ -48,6 +48,8 @@ class Project(PyironProject):
         if job.status.finished:
             return job
         job.structure = structure
+        if self.potential is None:
+            self.potential = job.list_potentials()[0]
         if pressure:
             job.calc_minimize(pressure=[0, 0, 0])
         else:
@@ -59,13 +61,13 @@ class Project(PyironProject):
     def lmp_hessian(self):
         if self.structure is None:
             raise AssertionError('Structure not set')
-        lmp = self.create.job.Lammps(('lmp_qha', self.structure, self.potential))
+        lmp = self.create.job.Lammps(('lmp_qha', self.structure))
         lmp.structure = self.structure
         if self.potential is None:
             self.potential = lmp.list_potentials()[0]
         lmp.potential = self.potential
         lmp.interactive_open()
-        qha = lmp.create_job('QuasiHarmonicApproximation', lmp.job_name.replace('lmp', 'qha'))
+        qha = lmp.create_job('QuasiHarmonicApproximation', lmp.job_name.replace('lmp', ''))
         qha.input['num_points'] = 1
         if qha.status.initialized:
             qha.run()
