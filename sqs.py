@@ -2,7 +2,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 
-class SQS:
+class SQSInteractive:
     def __init__(
         self,
         structure,

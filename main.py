@@ -1,7 +1,8 @@
 from pyiron_atomistics import Project as PyironProject
 import numpy as np
 from collections import defaultdict
-from pyiron_contrib.atomistics.atomistics.job.sqs import SQS
+from spin_space_averaging.sqs import SQSInteractive
+from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
 
 
 def get_bfgs(s, y, H):
@@ -32,10 +33,11 @@ class Project(PyironProject):
         self.n_cores = 80
         self.interpolate_h_mag = True
         self.ready_to_run = True
-        self.magmom_manitudes = None
+        self.magmom_magnitudes = None
         self._magmoms = None
         self.n_copy = None
         self._symmetry = None
+        self.mixing_parameter = 0.3
 
     @property
     def symmetry(self):
@@ -67,7 +69,8 @@ class Project(PyironProject):
             self.potential = lmp.list_potentials()[0]
         lmp.potential = self.potential
         lmp.interactive_open()
-        qha = lmp.create_job('QuasiHarmonicApproximation', lmp.job_name.replace('lmp', ''))
+        qha = self.create_job(QuasiHarmonicApproximation, lmp.job_name.replace('lmp_', ''))
+        qha.ref_job = lmp
         qha.input['num_points'] = 1
         if qha.status.initialized:
             qha.run()
@@ -77,7 +80,10 @@ class Project(PyironProject):
         job.set_convergence_precision(electronic_energy=1e-6)
         job.set_encut(encut=550)
         job.set_kpoints(k_mesh_spacing=0.1)
-        job.set_mixing_parameters(density_residual_scaling=0.3, spin_residual_scaling=0.3)
+        job.set_mixing_parameters(
+            density_residual_scaling=self.mixing_parameter,
+            spin_residual_scaling=self.mixing_parameter
+        )
         if fix_spin:
             job.fix_spin_constraint = True
         job.server.cores = self.n_cores
@@ -90,9 +96,22 @@ class Project(PyironProject):
             raise ValueError('magmoms not set yet - execute run_sqs')
         return self._magmoms
 
-    def run_sqs(self, cutoff, n_copy, n_steps=5000, sigma=0.05, max_sigma=4, n_points=100, min_sample_value=1.0e-8):
-        sqs = SQS(
-            structure=self.structure,
+    def run_sqs(
+        self,
+        cutoff,
+        n_copy,
+        nonmag_ids=None,
+        n_steps=5000,
+        sigma=0.05,
+        max_sigma=4,
+        n_points=100,
+        min_sample_value=1.0e-8
+    ):
+        indices = np.arange(len(self.structure))
+        if nonmag_ids is not None:
+            indices = np.delete(indices, nonmag_ids)
+        sqs = SQSInteractive(
+            structure=self.structure[indices],
             concentration=0.5,
             cutoff=cutoff,
             n_copy=n_copy,
@@ -103,7 +122,8 @@ class Project(PyironProject):
         )
         self.n_copy = n_copy
         sqs.run_mc(n_steps)
-        self._magmoms = sqs.spins
+        self._magmoms = np.zeros((n_copy, len(self.structure)))
+        self._magmoms.T[indices] = sqs.spins.T
 
     def run_init_magmoms(self):
         if self.magmom_magnitudes is None:
@@ -118,10 +138,12 @@ class Project(PyironProject):
 
     def get_output(self, job_list, pr=None, shape=None):
         if pr is None:
-            pr = self
+            pr = len(job_list) * [self]
+        if not isinstance(pr, list):
+            pr = len(job_list) * [pr]
         output = defaultdict(list)
-        for job_name in job_list:
-            job = pr.load(job_name)
+        for job_name, prr in zip(job_list, pr):
+            job = prr.load(job_name)
             output['energy'].append(job.output.energy_pot[-1])
             output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
             output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
@@ -171,11 +193,13 @@ class Project(PyironProject):
 
     def set_initial_H_mag(self, magnetic_forces=None, magmoms=None, hessian=None):
         if magnetic_forces is not None and magmoms is not None:
-            self.H_mag_init = np.squeeze(
-                np.diff(magnetic_forces, axis=0) / np.diff(magmoms, axis=0)
-            )
+            mm = np.sum(magmoms**2, axis=0)
+            mn = np.sum(magmoms * magnetic_forces, axis=0)
+            m = np.sum(magmoms**2, axis=0)
+            n = np.sum(magnetic_forces, axis=0)
+            H = (len(magmoms) * mn - m * n) / (len(magmoms) * mm - m**2)
             self.H_mag_init = np.mean(
-                np.mean(self.H_mag_init, axis=0)[self.symmetry.permutations], axis=0
+                np.mean(H, axis=0)[self.symmetry.permutations], axis=0
             )
         elif hessian is not None:
             self.H_mag_init = hessian
