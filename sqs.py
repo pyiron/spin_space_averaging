@@ -1,5 +1,7 @@
 import numpy as np
 from tqdm.auto import tqdm
+from pyiron_atomistics.atomistics.job.atomistic import AtomisticGenericJob
+from pyiron_base.generic.genericinput import GenericInput, InputField
 
 
 class SQSInteractive:
@@ -142,3 +144,18 @@ class SQSInteractive:
                 current_value = new_value
                 results.append([iii, current_value])
         return np.array(results)
+
+
+class Input(GenericInput):
+    concentration = InputField('concentration', 'Concentration', float)
+        name,
+        doc,
+        data_type=None,
+        fget=lambda x: x,
+        fset=lambda x: x,
+        default=None,
+
+
+class SQS(AtomisticGenericJob):
+    def __init__(self, project, job_name):
+        super().__init__(project, job_name)
