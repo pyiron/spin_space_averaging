@@ -1,7 +1,7 @@
 import numpy as np
 from tqdm.auto import tqdm
 from pyiron_atomistics.atomistics.job.atomistic import AtomisticGenericJob
-from pyiron_base.generic.genericinput import GenericInput, InputField
+from pyiron_base import DataContainer
 
 
 class SQSInteractive:
@@ -146,16 +146,51 @@ class SQSInteractive:
         return np.array(results)
 
 
-class Input(GenericInput):
-    concentration = InputField('concentration', 'Concentration', float)
-        name,
-        doc,
-        data_type=None,
-        fget=lambda x: x,
-        fset=lambda x: x,
-        default=None,
-
-
 class SQS(AtomisticGenericJob):
     def __init__(self, project, job_name):
         super().__init__(project, job_name)
+        self.input = DataContainer()
+        self.output = DataContainer()
+        self.input.concentration = None
+        self.input.cutoff = 10
+        self.input.sigma = 0.05
+        self.input.max_sigma = 4
+        self.input.n_points = 200
+        self.input.min_sample_value = 1.0e-8
+        self.input.n_copy = 8
+        self.input.n_steps = 1000
+        self._python_only_job = True
+
+    def validate_ready_to_run(self):
+        if self.input.concentration is None:
+            raise AssertionError('Concentration not set')
+        if not 0 < self.input.concentration < 1:
+            raise ValueError('Concentration must be between 0 and 1')
+
+    def run_static(self):
+        sqs = SQSInteractive(
+            structure=self.structure,
+            concentration=self.input.concentration,
+            cutoff=self.input.cutoff,
+            n_copy=self.input.n_copy,
+            sigma=self.input.sigma,
+            max_sigma=self.input.max_sigma,
+            n_points=self.input.n_points,
+            min_sample_value=self.input.min_sample_value,
+        )
+        results = sqs.run_mc(n_steps=self.input.n_steps)
+        self.output.accepted_steps = results[:, 0]
+        self.output.cost_value = results[:, 1]
+        self.output.spins = sqs.spins
+        self.status.finished = True
+        self.to_hdf()
+
+    def to_hdf(self, hdf=None, group_name=None):
+        super().to_hdf(hdf=hdf, group_name=group_name)
+        self.output.to_hdf(hdf=self.project_hdf5, group_name="")
+        self.input.to_hdf(hdf=self.project_hdf5, group_name="")
+
+    def from_hdf(self, hdf=None, group_name=None):
+        super().from_hdf(hdf=hdf, group_name=group_name)
+        self.output.from_hdf(hdf=self.project_hdf5, group_name="")
+        self.input.from_hdf(hdf=self.project_hdf5, group_name="")
