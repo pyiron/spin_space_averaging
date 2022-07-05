@@ -30,74 +30,66 @@ class Project(PyironProject):
         )
         self.structure = None
         self.potential = None
-        self.n_cores = 80
         self.interpolate_h_mag = True
         self.ready_to_run = True
         self.magmom_magnitudes = None
         self._magmoms = None
         self.n_copy = None
         self._symmetry = None
-        self.mixing_parameter = 0.3
 
-    @property
-    def symmetry(self):
-        if self._symmetry is None:
-            self._symmetry = self.structure.get_symmetry()
-        return self._symmetry
-
-    def get_relaxed_job(self, structure, pressure=False):
-        job = self.create.job.Lammps(('lmp_relax', pressure))
-        if job.status.finished:
-            return job
+    def get_lmp_relaxed_structure(self, structure, potential, symmetry=None):
+        job = self.create.job.Lammps(('lmp_relax', structure))
+        if symmetry is None:
+            symmetry = structure.get_symmetry()
         job.structure = structure
-        if self.potential is None:
-            self.potential = job.list_potentials()[0]
-        if pressure:
-            job.calc_minimize(pressure=[0, 0, 0])
-        else:
-            job.calc_minimize()
-        job.run()
-        return job
+        job.potential = potential
+        job.calc_minimize()
+        if job.status.initialized:
+            job.run()
+        structure.positions += symmetry.symmetrize_vectors(
+            job.output.total_displacements[-1]
+        )
+        return structure.center_coordinates_in_unit_cell()
 
-    @property
-    def lmp_hessian(self):
-        if self.structure is None:
-            raise AssertionError('Structure not set')
-        lmp = self.create.job.Lammps(('lmp_qha', self.structure))
-        lmp.structure = self.structure
-        if self.potential is None:
-            self.potential = lmp.list_potentials()[0]
-        lmp.potential = self.potential
+    def get_lmp_hessian(self, lmp):
         lmp.interactive_open()
-        qha = self.create_job(QuasiHarmonicApproximation, lmp.job_name.replace('lmp_', ''))
+        qha = self.create_job(QuasiHarmonicApproximation, 'qha_' + lmp.job_name)
         qha.ref_job = lmp
         qha.input['num_points'] = 1
         if qha.status.initialized:
             qha.run()
         return qha['output/force_constants'][0]
 
-    def set_input(self, job, fix_spin=True):
-        job.set_convergence_precision(electronic_energy=1e-6)
-        job.set_encut(encut=550)
-        job.set_kpoints(k_mesh_spacing=0.1)
+    def set_input(
+        self,
+        job,
+        fix_spin=True,
+        electronic_energy=1e-6,
+        encut=550,
+        k_mesh_spacing=0.1,
+        mixing_parameter=1.0,
+        residual_scaling=0.3,
+        n_cores=80,
+    ):
+        job.set_convergence_precision(electronic_energy=electronic_energy)
+        job.set_encut(encut=encut)
+        job.set_kpoints(k_mesh_spacing=k_mesh_spacing)
         job.set_mixing_parameters(
-            density_residual_scaling=self.mixing_parameter,
-            spin_residual_scaling=self.mixing_parameter
+            density_residual_scaling=residual_scaling,
+            density_mixing_parameter=mixing_parameter,
+            spin_residual_scaling=residual_scaling,
+            spin_mixing_parameter=mixing_parameter,
         )
         if fix_spin:
             job.fix_spin_constraint = True
-        job.server.cores = self.n_cores
+            job.structure.spin_constraint[job.structure.select_index('C')] = False
+        job.server.cores = n_cores
         job.server.queue = 'cm'
         job.calc_static()
 
-    @property
-    def magmoms(self):
-        if self._magmoms is None:
-            raise ValueError('magmoms not set yet - execute run_sqs')
-        return self._magmoms
-
-    def run_sqs(
+    def get_sqs(
         self,
+        structure,
         cutoff,
         n_copy,
         nonmag_ids=None,
@@ -107,11 +99,11 @@ class Project(PyironProject):
         n_points=100,
         min_sample_value=1.0e-8
     ):
-        indices = np.arange(len(self.structure))
+        indices = np.arange(len(structure))
         if nonmag_ids is not None:
             indices = np.delete(indices, nonmag_ids)
         sqs = SQSInteractive(
-            structure=self.structure[indices],
+            structure=structure[indices],
             concentration=0.5,
             cutoff=cutoff,
             n_copy=n_copy,
@@ -120,21 +112,10 @@ class Project(PyironProject):
             n_points=n_points,
             min_sample_value=min_sample_value
         )
-        self.n_copy = n_copy
         sqs.run_mc(n_steps)
-        self._magmoms = np.zeros((n_copy, len(self.structure)))
-        self._magmoms.T[indices] = sqs.spins.T
-
-    def run_init_magmoms(self):
-        if self.magmom_magnitudes is None:
-            raise ValueError('magmom magnitudes not defined')
-        for mag in self.magmom_magnitudes:
-            for ii, mm in enumerate(self.magmoms):
-                job = self.create.job.Sphinx(('spx_v', self.structure, mag, ii, 0))
-                job.structure = self.structure
-                job.structure.set_initial_magnetic_moments(mag * mm)
-                self.set_input(job)
-                job.run()
+        magmoms = np.zeros((n_copy, len(structure)))
+        magmoms.T[indices] = sqs.spins.T
+        return magmoms
 
     def get_output(self, job_list, pr=None, shape=None):
         if pr is None:
@@ -157,73 +138,59 @@ class Project(PyironProject):
             output['positions'] = np.array(output['positions']).reshape(shape + (-1, 3,))
         return output
 
-    def get_init_hessian_mag(self, pr=None):
-        job_lst = [
-            ('spx_v', self.structure, mag, ii, 0)
-            for mag in self.magmom_magnitudes
-            for ii in range(self.n_copy)
-        ]
-        output = self.get_output(
-            job_lst, pr=pr, shape=(len(self.magmom_magnitudes), self.n_copy)
-        )
-        self.set_initial_H_mag(output['nu'], output['magmoms'])
-
-    def symmetrize_magmoms(self, magmoms, signs=None):
+    def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
         if signs is None:
             signs = np.sign(magmoms)
         signs = np.sign(signs)
-        magmoms = np.reshape(magmoms, (-1, self.n_copy, len(self.structure)))
-        signs = np.reshape(signs, (-1, self.n_copy, len(self.structure)))
+        magmoms = np.atleast_3d(magmoms)
+        signs = np.atleast_3d(signs)
         return np.mean([
-            mm[self.symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
+            mm[symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
         ], axis=1).squeeze()
 
-    def update_hessian(self, magnetic_forces, magmoms, positions, forces, n_cycle):
-        nu = self.symmetrize_magmoms(magnetic_forces, magmoms)
-        magmoms = self.symmetrize_magmoms(magmoms)
-        f_sym = self.symmetry.symmetrize_vectors(forces.mean(axis=1)).reshape(n_cycle, -1)
+    def update_hessian(
+        self, structure, hessian, magnetic_forces, magmoms, positions, forces, symmetry=None
+    ):
+        if symmetry is None:
+            symmetry = structure.get_symmetry()
+        nu = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
+        magmoms = self.symmetrize_magmoms(symmetry, magmoms)
+        f_sym = symmetry.symmetrize_vectors(forces.mean(axis=1)).reshape(-1, 3 * len(structure))
         x_diff = np.diff(positions, axis=0)
-        x_diff = self.structure.find_mic(x_diff).reshape(n_cycle - 1, -1)
-        x_diff = np.append(
-            x_diff, np.diff(magmoms, axis=0), axis=1
-        )
+        x_diff = structure.find_mic(x_diff).reshape(-1, 3 * len(structure))
+        x_diff = np.append(x_diff, np.diff(magmoms, axis=0), axis=1)
         dUdx = np.append(-f_sym, nu, axis=1)
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
-            self.H_current += get_bfgs(xx, ff, self.H_current)
+            hessian += get_bfgs(xx, ff, hessian)
+        return hessian
 
-    def set_initial_H_mag(self, magnetic_forces=None, magmoms=None, hessian=None):
-        if magnetic_forces is not None and magmoms is not None:
-            mm = np.sum(magmoms**2, axis=0)
-            mn = np.sum(magmoms * magnetic_forces, axis=0)
-            m = np.sum(magmoms**2, axis=0)
-            n = np.sum(magnetic_forces, axis=0)
-            H = (len(magmoms) * mn - m * n) / (len(magmoms) * mm - m**2)
-            self.H_mag_init = np.mean(
-                np.mean(H, axis=0)[self.symmetry.permutations], axis=0
-            )
-        elif hessian is not None:
-            self.H_mag_init = hessian
-        else:
-            raise ValueError('input values not set')
-        self.H_mag_init = np.eye(len(self.H_mag_init)) * self.H_mag_init
-        if len(self.H_mag_init) != len(self.structure):
-            raise AssertionError('Length not correct')
-        self.set_initial_H(self.lmp_hessian, self.H_mag_init)
+    def set_initial_H_mag(self, magnetic_forces, magmoms, symmetry):
+        """
+            shape: (m_states, n_copy)
+        """
+        mm = np.sum(magmoms**2, axis=0)
+        mn = np.sum(magmoms * magnetic_forces, axis=0)
+        m = np.sum(magmoms, axis=0)
+        n = np.sum(magnetic_forces, axis=0)
+        H = (len(magmoms) * mn - m * n) / (len(magmoms) * mm - m**2)
+        return np.mean(
+            np.mean(H, axis=0)[symmetry.permutations], axis=0
+        )
 
-    def get_dx(self, forces, magnetic_forces, magmoms=None, symmetrize=False):
-        if symmetrize:
-            if magmoms is None:
-                raise ValueError('when symmetrize is on magmoms is required')
-            magnetic_forces = self.symmetrize_magmoms(magnetic_forces, magmoms)
-            forces = self.symmetry.symmetrize_vectors(forces.mean(axis=0))
-        xm_new = np.einsum('ij,j->i', np.linalg.inv(self.H_current), np.append(-forces, magnetic_forces))
-        dx = -xm_new[:3 * len(self.structure)].reshape(-1, 3)
-        dm = -xm_new[3 * len(self.structure):]
+    def get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
+        if symmetry is not None:
+            if magmoms is not None:
+                magnetic_forces = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
+            forces = symmetry.symmetrize_vectors(forces.mean(axis=0))
+        xm_new = np.einsum('ij,j->i', np.linalg.inv(hessian), np.append(-forces, magnetic_forces))
+        dx = -xm_new[:3 * forces.shape[-2]].reshape(-1, 3)
+        dm = -xm_new[3 * forces.shape[-2]:]
         return dx, dm
 
     def set_initial_H(self, H_phonon, H_magnon):
-        n = len(self.structure)
-        self.H_init = np.eye(4 * n)
-        self.H_init[:3 * n, :3 * n] = H_phonon.copy()
-        self.H_init[3 * n:, 3 * n:] *= H_magnon
+        n = (len(H_phonon) + len(H_magnon)) // 4
+        H = np.eye(4 * n)
+        H[:3 * n, :3 * n] = H_phonon.copy()
+        H[3 * n:, 3 * n:] *= H_magnon
+        return H
         self.H_current = self.H_init.copy()
