@@ -133,8 +133,8 @@ class Project(PyironProject):
         if signs is None:
             signs = np.sign(magmoms)
         signs = np.sign(signs)
-        magmoms = np.atleast_3d(magmoms)
-        signs = np.atleast_3d(signs)
+        magmoms = np.atleast_3d(np.asarray(magmoms).T).T
+        signs = np.atleast_3d(signs.T).T
         return np.mean([
             mm[symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
         ], axis=1).squeeze()
@@ -155,7 +155,7 @@ class Project(PyironProject):
             hessian += get_bfgs(xx, ff, hessian)
         return hessian
 
-    def set_initial_H_mag(self, magnetic_forces, magmoms, symmetry):
+    def get_initial_H_mag(self, magnetic_forces, magmoms, symmetry):
         """
             shape: (m_states, n_copy)
         """
@@ -178,10 +178,9 @@ class Project(PyironProject):
         dm = -xm_new[3 * forces.shape[-2]:]
         return dx, dm
 
-    def set_initial_H(self, H_phonon, H_magnon):
+    def get_initial_H(self, H_phonon, H_magnon):
         n = (len(H_phonon) + len(H_magnon)) // 4
         H = np.eye(4 * n)
         H[:3 * n, :3 * n] = H_phonon.copy()
         H[3 * n:, 3 * n:] *= H_magnon
         return H
-        self.H_current = self.H_init.copy()
