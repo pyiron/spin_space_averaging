@@ -15,35 +15,22 @@ def get_bfgs(s, y, H):
 
 
 class Project(PyironProject):
-    def __init__(
-        self,
-        path='',
-        user=None,
-        sql_query=None,
-        default_working_directory=False,
-    ):
-        super().__init__(
-            path=path,
-            user=user,
-            sql_query=sql_query,
-            default_working_directory=default_working_directory,
-        )
-        self.structure = None
-        self.potential = None
-        self.interpolate_h_mag = True
-        self.ready_to_run = True
-        self.magmom_magnitudes = None
-        self._magmoms = None
-        self.n_copy = None
-        self._symmetry = None
+    """
+    Welcome to the Spin Space Average workflow
+    """
 
-    def get_lmp_relaxed_structure(self, structure, potential, symmetry=None):
-        job = self.create.job.Lammps(('lmp_relax', structure))
+    def get_lmp_relaxed_structure(
+        self, structure, potential=None, symmetry=None, pressure=None, delete_existing_job=False
+    ):
+        job = self.create.job.Lammps(
+            ('lmp_relax', structure), delete_existing_job=delete_existing_job
+        )
         if symmetry is None:
             symmetry = structure.get_symmetry()
         job.structure = structure
-        job.potential = potential
-        job.calc_minimize()
+        if potential is not None:
+            job.potential = potential
+        job.calc_minimize(pressure=pressure)
         if job.status.initialized:
             job.run()
         structure.positions += symmetry.symmetrize_vectors(
@@ -51,7 +38,11 @@ class Project(PyironProject):
         )
         return structure.center_coordinates_in_unit_cell()
 
-    def get_lmp_hessian(self, lmp):
+    def get_lmp_hessian(self, structure, potential=None):
+        lmp = self.create.job.Lammps(('lmp', structure))
+        lmp.structure = structure
+        if potential is not None:
+            lmp.potential = potential
         lmp.interactive_open()
         qha = self.create_job(QuasiHarmonicApproximation, 'qha_' + lmp.job_name)
         qha.ref_job = lmp
