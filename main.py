@@ -123,10 +123,12 @@ class Project(PyironProject):
             output['forces'].append(job['output/generic/forces'][0])
             output['positions'].append(job['output/generic/positions'][0])
         if shape is not None:
-            output['magmoms'] = np.array(output['magmoms']).reshape(shape + (-1,))
-            output['nu'] = np.array(output['nu']).reshape(shape + (-1,))
-            output['forces'] = np.array(output['forces']).reshape(shape + (-1, 3,))
-            output['positions'] = np.array(output['positions']).reshape(shape + (-1, 3,))
+            output['energy'] = np.reshape(output['energy'], shape)
+            output['ediff'] = np.reshape(output['ediff'], shape)
+            output['magmoms'] = np.reshape(output['magmoms'], shape + (-1,))
+            output['nu'] = np.reshape(output['nu'], shape + (-1,))
+            output['forces'] = np.reshape(output['forces'], shape + (-1, 3,))
+            output['positions'] = np.reshape(output['positions'], shape + (-1, 3,))
         return output
 
     def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
@@ -151,9 +153,10 @@ class Project(PyironProject):
         x_diff = structure.find_mic(x_diff).reshape(-1, 3 * len(structure))
         x_diff = np.append(x_diff, np.diff(magmoms, axis=0), axis=1)
         dUdx = np.append(-f_sym, nu, axis=1)
+        new_hessian = hessian.copy()
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
-            hessian += get_bfgs(xx, ff, hessian)
-        return hessian
+            new_hessian += get_bfgs(xx, ff, new_hessian)
+        return new_hessian
 
     def get_initial_H_mag(self, magnetic_forces, magmoms, symmetry):
         """
