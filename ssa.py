@@ -3,6 +3,7 @@ import numpy as np
 from collections import defaultdict
 from spin_space_averaging.sqs import SQSInteractive
 from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
+from pyiron_base.job.util import _get_safe_job_name
 
 
 def get_bfgs(s, y, H):
@@ -27,38 +28,44 @@ class SSA:
         self._lmp_structure_zero = None
         self._lmp_structure = None
         self._symmetry = None
+        self.all_jobs = {}
         try:
             self.project.data.read()
         except KeyError:
-            self.input['n_copy'] = 8
-            self.input['structure'] = None
-            self.input['nonmag_atoms'] = None
+            self.input.n_copy = 8
+            self.input.structure = None
+            self.input.nonmag_atoms = None
             self.input.create_group('lammps')
-            self.input.lammps['potential'] = None
+            self.input.lammps.potential = None
             self.input.create_group('symmetry')
-            self.input.symmetry['symprec'] = 1e-05
+            self.input.symmetry.symprec = 1e-05
             self.input.create_group('sqs')
-            self.input.sqs['cutoff'] = 10
-            self.input.sqs['sigma'] = 0.05
-            self.input.sqs['max_sigma'] = 4
-            self.input.sqs['n_points'] = 200
-            self.input.sqs['min_sample_value'] = 1.0e-8
-            self.input.sqs['n_steps'] = 10000
+            self.input.sqs.cutoff = 10
+            self.input.sqs.sigma = 0.05
+            self.input.sqs.max_sigma = 4
+            self.input.sqs.n_points = 200
+            self.input.sqs.min_sample_value = 1.0e-8
+            self.input.sqs.n_steps = 10000
             self.input.create_group('init_hessian')
-            self.input.init_hessian['phonon'] = None
-            self.input.init_hessian['magnon'] = None
-            self.input.init_hessian['magnetic_moments'] = None
+            self.input.init_hessian.phonon = None
+            self.input.init_hessian.magnon = None
+            self.input.init_hessian.magnetic_moments = None
             self.input.create_group('dft')
-            self.input.dft['electronic_energy'] = 1e-6
-            self.input.dft['encut'] = 550
-            self.input.dft['k_mesh_spacing'] = 0.1
-            self.input.dft['mixing_parameter'] = 1.0
-            self.input.dft['residual_scaling'] = 0.3
-            self.input.dft['n_cores'] = 80
+            self.input.dft.electronic_energy = 1e-6
+            self.input.dft.encut = 550
+            self.input.dft.k_mesh_spacing = 0.1
+            self.input.dft.mixing_parameter = 1.0
+            self.input.dft.residual_scaling = 0.3
+            self.input.dft.n_cores = 80
             self.sync()
 
+    def _dft_job_name(self):
+        dft = self.input.dft
+        values = [dft[k] for k in dft.list_nodes() if k != 'n_cores']
+        return np.tanh(values).sum()
+
     def set_nonmag_atoms(self, ids):
-        self.input['nonmag_atoms'] = ids
+        self.input.nonmag_atoms = ids
         self.sync()
 
     @property
@@ -121,6 +128,34 @@ class SSA:
             )
             self.sync()
         return self.output['sqs']
+
+    def set_input(
+        self,
+        job,
+        fix_spin=True,
+        electronic_energy=1e-6,
+        encut=550,
+        k_mesh_spacing=0.1,
+        mixing_parameter=1.0,
+        residual_scaling=0.3,
+        n_cores=80,
+    ):
+        job.set_convergence_precision(electronic_energy=electronic_energy)
+        job.set_encut(encut=encut)
+        job.set_kpoints(k_mesh_spacing=k_mesh_spacing)
+        job.set_mixing_parameters(
+            density_residual_scaling=residual_scaling,
+            density_mixing_parameter=mixing_parameter,
+            spin_residual_scaling=residual_scaling,
+            spin_mixing_parameter=mixing_parameter,
+        )
+        if fix_spin:
+            job.fix_spin_constraint = True
+            if self.input.nonmag_atoms is not None:
+                job.structure.spin_constraint[self.input.nonmag_atoms] = False
+        job.server.cores = n_cores
+        job.server.queue = 'cm'
+        job.calc_static()
 
     def lmp_hessian(self):
         if self.input.init_hessian.phonon is None:
@@ -192,13 +227,27 @@ class SSA:
             )
         return self._lmp_structure_zero
 
+    @property
+    def init_magmom_jobs(self):
+        if self.input.init_hessian.magnetic_moments is None:
+            raise ValueError(
+                'job.input.init_hessian.magnetic_moments not defined'
+            )
+        for mm in self.input.init_hessian.magnetic_moments:
+            job_name = _get_safe_job_name
+            if 
+
     def initial_hessian_mag(self):
         if self.input.init_hessian['magnon'] is None:
-            self.input.init_hessian['magnon'] = self.get_initial_H_mag()
+            if self.input.init_hessian.magnetic_moments is None:
+                raise ValueError(
+                    'job.input.init_hessian.magnetic_moments not defined'
+                )
+            self.input.init_hessian['magnon'] = self.get_initial_hessian_mag()
             self.sync()
         return self.input.init_hessian['magnon']
 
-    def get_initial_H_mag(self, magnetic_forces, magmoms, symmetry, weights=None):
+    def get_initial_hessian_mag(self, magnetic_forces, magmoms, symmetry, weights=None):
         """
             shape: (m_states, n_copy)
         """
@@ -225,6 +274,16 @@ class SSA:
             )
         return self._lmp_structure_zero
 
+    def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
+        if signs is None:
+            signs = np.sign(magmoms)
+        signs = np.sign(signs)
+        magmoms = np.atleast_3d(np.asarray(magmoms).T).T
+        signs = np.atleast_3d(signs.T).T
+        return np.mean([
+            mm[symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
+        ], axis=1).squeeze()
+
     @property
     def project(self):
         return self._project
@@ -250,33 +309,6 @@ class Project(PyironProject):
     Welcome to the Spin Space Average workflow
     """
 
-    def set_input(
-        self,
-        job,
-        fix_spin=True,
-        electronic_energy=1e-6,
-        encut=550,
-        k_mesh_spacing=0.1,
-        mixing_parameter=1.0,
-        residual_scaling=0.3,
-        n_cores=80,
-    ):
-        job.set_convergence_precision(electronic_energy=electronic_energy)
-        job.set_encut(encut=encut)
-        job.set_kpoints(k_mesh_spacing=k_mesh_spacing)
-        job.set_mixing_parameters(
-            density_residual_scaling=residual_scaling,
-            density_mixing_parameter=mixing_parameter,
-            spin_residual_scaling=residual_scaling,
-            spin_mixing_parameter=mixing_parameter,
-        )
-        if fix_spin:
-            job.fix_spin_constraint = True
-            job.structure.spin_constraint[job.structure.select_index('C')] = False
-        job.server.cores = n_cores
-        job.server.queue = 'cm'
-        job.calc_static()
-
     def get_output(self, job_list, pr=None, shape=None):
         if pr is None:
             pr = len(job_list) * [self]
@@ -300,16 +332,6 @@ class Project(PyironProject):
             output['positions'] = np.reshape(output['positions'], shape + (-1, 3,))
         return output
 
-    def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
-        if signs is None:
-            signs = np.sign(magmoms)
-        signs = np.sign(signs)
-        magmoms = np.atleast_3d(np.asarray(magmoms).T).T
-        signs = np.atleast_3d(signs.T).T
-        return np.mean([
-            mm[symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
-        ], axis=1).squeeze()
-
     def update_hessian(
         self, structure, hessian, magnetic_forces, magmoms, positions, forces, symmetry=None
     ):
@@ -326,22 +348,6 @@ class Project(PyironProject):
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
             new_hessian += get_bfgs(xx, ff, new_hessian)
         return new_hessian
-
-    def get_initial_H_mag(self, magnetic_forces, magmoms, symmetry, weights=None):
-        """
-            shape: (m_states, n_copy)
-        """
-        if weights is None:
-            weights = np.ones(len(magmoms))
-        mm = np.einsum('ij,i->j', magmoms**2, weights)
-        mn = np.einsum('ij,ij,i->j', magmoms, magnetic_forces, weights)
-        m = np.einsum('ij,i->j', magmoms, weights)
-        n = np.einsum('ij,i->j', magnetic_forces, weights)
-        w = np.sum(weights)
-        H = (w * mn - m * n) / (w * mm - m**2)
-        return np.mean(
-            np.mean(H, axis=0)[symmetry.permutations], axis=0
-        )
 
     def get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
