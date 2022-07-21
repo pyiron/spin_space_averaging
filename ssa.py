@@ -22,6 +22,12 @@ def get_bfgs(s, y, H):
     return dH
 
 
+def get_asym_sum(*args):
+    return np.sum([
+        np.sin(ii + 2) * arg for ii, arg in enumerate(args)
+    ])
+
+
 class SSA:
     def __init__(self, project, name):
         self._project = project.create_group(name)
@@ -29,6 +35,7 @@ class SSA:
         self._lmp_structure = None
         self._symmetry = None
         self.all_jobs = {}
+        self._is_running = False
         try:
             self.project.data.read()
         except KeyError:
@@ -57,12 +64,25 @@ class SSA:
             self.input.dft.mixing_parameter = 1.0
             self.input.dft.residual_scaling = 0.3
             self.input.dft.n_cores = 80
+            self.input.create_group('convergence')
+            self.input.convergence.phonon_force = 1.0e-2
+            self.input.convergence.magnon_force = 1.0e-1
             self.sync()
 
     def _dft_job_name(self):
         dft = self.input.dft
-        values = [dft[k] for k in dft.list_nodes() if k != 'n_cores']
-        return np.tanh(values).sum()
+        return get_asym_sum(
+            [dft[k] for k in dft.list_nodes() if k != 'n_cores']
+        )
+
+    def _structure_job_name(self):
+        box = self.structure
+        results = get_asym_sum(*box.positions.flatten())
+        results += get_asym_sum(*box.cell.flatten())
+        results += get_asym_sum(
+            *[ord(s) for s in ''.join(box.get_chemical_symbols())]
+        )
+        return results        
 
     def set_nonmag_atoms(self, ids):
         self.input.nonmag_atoms = ids
@@ -174,7 +194,7 @@ class SSA:
         return self._symmetry
 
     def get_lmp_hessian(self, structure, potential=None):
-        lmp = self.project.create.job.Lammps(('lmp', structure))
+        lmp = self.project.create.job.Lammps(('lmp', self._structure_job_name))
         lmp.structure = structure
         if potential is not None:
             lmp.potential = potential
@@ -186,13 +206,12 @@ class SSA:
             qha.run()
         return qha['output/force_constants'][0]
 
-
     def _get_lmp_minimize(
         self, structure, potential=None, symmetry=None, pressure=None
     ):
-        job_name = ('lmp_relax', structure, pressure)
+        job_name = ('lmp_relax', self._structure_job_name, pressure)
         if pressure is not None:
-            job_name = ('lmp_relax', structure, *pressure)
+            job_name = ('lmp_relax', self._structure_job_name, *pressure)
         job = self.project.create.job.Lammps(job_name)
         if symmetry is None:
             symmetry = structure.get_symmetry()
@@ -217,15 +236,15 @@ class SSA:
         return structure.center_coordinates_in_unit_cell()
 
     @property
-    def lmp_structure_zero(self):
-        if self._lmp_structure_zero is None:
-            self._lmp_structure_zero = self._get_lmp_minimize(
+    def lmp_structure(self):
+        if self._lmp_structure is None:
+            self._lmp_structure = self._get_lmp_minimize(
                 self.structure,
                 self.input.lammps['potential'],
                 self.symmetry,
                 None
             )
-        return self._lmp_structure_zero
+        return self._lmp_structure
 
     @property
     def init_magmom_jobs(self):
@@ -243,6 +262,25 @@ class SSA:
                 raise ValueError(
                     'job.input.init_hessian.magnetic_moments not defined'
                 )
+            job_lst = []
+            for magnitude in self.atleast_1d(self.input.init_hessian.magnetic_moments):
+                for magmoms in self.sqs:
+                    job_name = _get_safe_job_name((
+                        'spx',
+                        self._structure_job_name,
+                        self._dft_job_name,
+                        get_asym_sum(magmoms),
+                        magnitude
+                    ))
+                    spx = self.get_job(job_name)
+                    if spx is None:
+                        spx = self.project.create.job.Sphinx(job_nam)e)
+                        spx.structure = self.lmp_structure.copy()
+                        spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
+                        self.set_input(spx)
+                        spx.run()
+                        self._is_running = True
+                    job_lst.append(job_name)
             self.input.init_hessian['magnon'] = self.get_initial_hessian_mag()
             self.sync()
         return self.input.init_hessian['magnon']
@@ -284,6 +322,32 @@ class SSA:
             mm[symmetry.permutations] for mm in np.mean(magmoms * signs, axis=1)
         ], axis=1).squeeze()
 
+    def get_job(self, job_name):
+        if job_name not in list(self.all_job.keys()):
+            if job_name not in list(self.project.job_table().jobs):
+                return
+            self.all_job[job_name] = self.project.load(job_name)
+        return self.all_job[job_name]
+
+    def get_output(self, job_list, shape=None):
+        output = defaultdict(list)
+        for job_name in job_list:
+            job = self.get_job(job_name)
+            output['energy'].append(job.output.energy_pot[-1])
+            output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
+            output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
+            output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
+            output['forces'].append(job['output/generic/forces'][0])
+            output['positions'].append(job['output/generic/positions'][0])
+        if shape is not None:
+            output['energy'] = np.reshape(output['energy'], shape)
+            output['ediff'] = np.reshape(output['ediff'], shape)
+            output['magmoms'] = np.reshape(output['magmoms'], shape + (-1,))
+            output['nu'] = np.reshape(output['nu'], shape + (-1,))
+            output['forces'] = np.reshape(output['forces'], shape + (-1, 3,))
+            output['positions'] = np.reshape(output['positions'], shape + (-1, 3,))
+        return output
+
     @property
     def project(self):
         return self._project
@@ -308,29 +372,6 @@ class Project(PyironProject):
     """
     Welcome to the Spin Space Average workflow
     """
-
-    def get_output(self, job_list, pr=None, shape=None):
-        if pr is None:
-            pr = len(job_list) * [self]
-        if not isinstance(pr, list):
-            pr = len(job_list) * [pr]
-        output = defaultdict(list)
-        for job_name, prr in zip(job_list, pr):
-            job = prr.load(job_name)
-            output['energy'].append(job.output.energy_pot[-1])
-            output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
-            output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
-            output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
-            output['forces'].append(job['output/generic/forces'][0])
-            output['positions'].append(job['output/generic/positions'][0])
-        if shape is not None:
-            output['energy'] = np.reshape(output['energy'], shape)
-            output['ediff'] = np.reshape(output['ediff'], shape)
-            output['magmoms'] = np.reshape(output['magmoms'], shape + (-1,))
-            output['nu'] = np.reshape(output['nu'], shape + (-1,))
-            output['forces'] = np.reshape(output['forces'], shape + (-1, 3,))
-            output['positions'] = np.reshape(output['positions'], shape + (-1, 3,))
-        return output
 
     def update_hessian(
         self, structure, hessian, magnetic_forces, magmoms, positions, forces, symmetry=None
