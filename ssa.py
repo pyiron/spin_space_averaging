@@ -35,7 +35,8 @@ class SSA:
         self._lmp_structure = None
         self._symmetry = None
         self.all_jobs = {}
-        self._is_running = False
+        self._initial_hessian = None
+        self._lmp_hessian = None
         try:
             self.project.data.read()
         except KeyError:
@@ -178,12 +179,13 @@ class SSA:
         job.calc_static()
 
     def lmp_hessian(self):
-        if self.input.init_hessian.phonon is None:
-            self.input.init_hessian.phonon = self.get_lmp_hessian(
+        if self.input.init_hessian.phonon is not None:
+            return self.input.init_hessian.phonon
+        if self._lmp_hessian is None:
+            self._lmp_hessian = self.get_lmp_hessian(
                 self.structure, self.input.lammps.potential
             )
-            self.sync()
-        return self.input.init_hessian.phonon
+        return self._lmp_hessian
 
     @property
     def symmetry(self):
@@ -252,42 +254,74 @@ class SSA:
             raise ValueError(
                 'job.input.init_hessian.magnetic_moments not defined'
             )
-        for mm in self.input.init_hessian.magnetic_moments:
-            job_name = _get_safe_job_name
-            if 
+        is_running = False
+        job_lst = []
+        for magnitude in self.atleast_1d(self.input.init_hessian.magnetic_moments):
+            for magmoms in self.sqs:
+                job_name = _get_safe_job_name((
+                    'spx',
+                    self._structure_job_name,
+                    self._dft_job_name,
+                    get_asym_sum(magmoms),
+                    magnitude
+                ))
+                spx = self.get_job(job_name)
+                if spx is None:
+                    spx = self.project.create.job.Sphinx(job_name)
+                    spx.structure = self.lmp_structure.copy()
+                    spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
+                    self.set_input(spx)
+                    if spx.status.initialized:
+                        spx.run()
+                    is_running = True
+                job_lst.append(job_name)
+        if is_running:
+            return None
+        return job_lst
 
+    @property
     def initial_hessian_mag(self):
         if self.input.init_hessian['magnon'] is None:
             if self.input.init_hessian.magnetic_moments is None:
                 raise ValueError(
                     'job.input.init_hessian.magnetic_moments not defined'
                 )
-            job_lst = []
-            for magnitude in self.atleast_1d(self.input.init_hessian.magnetic_moments):
-                for magmoms in self.sqs:
-                    job_name = _get_safe_job_name((
-                        'spx',
-                        self._structure_job_name,
-                        self._dft_job_name,
-                        get_asym_sum(magmoms),
-                        magnitude
-                    ))
-                    spx = self.get_job(job_name)
-                    if spx is None:
-                        spx = self.project.create.job.Sphinx(job_nam)e)
-                        spx.structure = self.lmp_structure.copy()
-                        spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
-                        self.set_input(spx)
-                        spx.run()
-                        self._is_running = True
-                    job_lst.append(job_name)
-            self.input.init_hessian['magnon'] = self.get_initial_hessian_mag()
+            job_lst = self.init_magmom_jobs
+            if job_lst is None:
+                return
+            output = self.get_output(
+                job_lst, (len(self.input.init_hessian.magnetic_moments), -1)
+            )
+            self.input.init_hessian['magnon'] = self.get_initial_hessian_mag(
+                output['nu'],
+                output['magmoms'],
+                self.symmetry,
+            )
             self.sync()
         return self.input.init_hessian['magnon']
 
+    @property
+    def initial_hessian(self):
+        if self._initial_hessian is None:
+            H_phonon = self.input_hessian.phonon
+            H_magnon = self.initial_hessian_mag
+            if H_phonon is None or H_magnon is None:
+                return None
+            self._initial_hessian = self.get_initial_hessian(
+                H_phonon=H_phonon, H_magnon=H_magnon
+            )
+        return self._initial_hessian
+
+    def get_initial_hessian(self, H_phonon, H_magnon):
+        n = (len(H_phonon) + len(H_magnon)) // 4
+        H = np.eye(4 * n)
+        H[:3 * n, :3 * n] = H_phonon.copy()
+        H[3 * n:, 3 * n:] *= H_magnon
+        return H
+
     def get_initial_hessian_mag(self, magnetic_forces, magmoms, symmetry, weights=None):
         """
-            shape: (m_states, n_copy)
+        shape: (m_states, n_copy)
         """
         if weights is None:
             weights = np.ones(len(magmoms))
@@ -326,7 +360,10 @@ class SSA:
         if job_name not in list(self.all_job.keys()):
             if job_name not in list(self.project.job_table().jobs):
                 return
-            self.all_job[job_name] = self.project.load(job_name)
+            job = self.project.load(job_name)
+            if job.status.running:
+                return None
+            self.all_job[job_name] = job
         return self.all_job[job_name]
 
     def get_output(self, job_list, shape=None):
@@ -399,10 +436,3 @@ class Project(PyironProject):
         dx = -xm_new[:3 * forces.shape[-2]].reshape(-1, 3)
         dm = -xm_new[3 * forces.shape[-2]:]
         return dx, dm
-
-    def get_initial_H(self, H_phonon, H_magnon):
-        n = (len(H_phonon) + len(H_magnon)) // 4
-        H = np.eye(4 * n)
-        H[:3 * n, :3 * n] = H_phonon.copy()
-        H[3 * n:, 3 * n:] *= H_magnon
-        return H
