@@ -201,7 +201,9 @@ class SSA:
         if potential is not None:
             lmp.potential = potential
         lmp.interactive_open()
-        qha = self.project.create_job(QuasiHarmonicApproximation, 'qha_' + lmp.job_name)
+        qha = self.project.create_job(
+            QuasiHarmonicApproximation, 'qha_' + lmp.job_name
+        )
         qha.ref_job = lmp
         qha.input['num_points'] = 1
         if qha.status.initialized:
@@ -319,7 +321,9 @@ class SSA:
         H[3 * n:, 3 * n:] *= H_magnon
         return H
 
-    def get_initial_hessian_mag(self, magnetic_forces, magmoms, symmetry, weights=None):
+    def get_initial_hessian_mag(
+        self, magnetic_forces, magmoms, symmetry, weights=None
+    ):
         """
         shape: (m_states, n_copy)
         """
@@ -371,7 +375,9 @@ class SSA:
         for job_name in job_list:
             job = self.get_job(job_name)
             output['energy'].append(job.output.energy_pot[-1])
-            output['ediff'].append(np.diff(job['output/generic/dft/scf_energy_free'][0])[-1])
+            output['ediff'].append(
+                np.diff(job['output/generic/dft/scf_energy_free'][0])[-1]
+            )
             output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
             output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
             output['forces'].append(job['output/generic/forces'][0])
@@ -411,13 +417,22 @@ class Project(PyironProject):
     """
 
     def update_hessian(
-        self, structure, hessian, magnetic_forces, magmoms, positions, forces, symmetry=None
+        self,
+        structure,
+        hessian,
+        magnetic_forces,
+        magmoms,
+        positions,
+        forces,
+        symmetry=None
     ):
         if symmetry is None:
             symmetry = structure.get_symmetry()
         nu = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
         magmoms = self.symmetrize_magmoms(symmetry, magmoms)
-        f_sym = symmetry.symmetrize_vectors(forces.mean(axis=1)).reshape(-1, 3 * len(structure))
+        f_sym = symmetry.symmetrize_vectors(
+            forces.mean(axis=1)
+        ).reshape(-1, 3 * len(structure))
         x_diff = np.diff(positions, axis=0)
         x_diff = structure.find_mic(x_diff).reshape(-1, 3 * len(structure))
         x_diff = np.append(x_diff, np.diff(magmoms, axis=0), axis=1)
@@ -430,9 +445,13 @@ class Project(PyironProject):
     def get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
             if magmoms is not None:
-                magnetic_forces = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
+                magnetic_forces = self.symmetrize_magmoms(
+                    symmetry, magnetic_forces, magmoms
+                )
             forces = symmetry.symmetrize_vectors(forces.mean(axis=0))
-        xm_new = np.einsum('ij,j->i', np.linalg.inv(hessian), np.append(-forces, magnetic_forces))
+        xm_new = np.einsum(
+            'ij,j->i', np.linalg.inv(hessian), np.append(-forces, magnetic_forces)
+        )
         dx = -xm_new[:3 * forces.shape[-2]].reshape(-1, 3)
         dm = -xm_new[3 * forces.shape[-2]:]
         return dx, dm
