@@ -1,7 +1,7 @@
 from pyiron_atomistics import Project as PyironProject
 import numpy as np
 from collections import defaultdict
-from spin_space_averaging.sqs import SQSInteractive
+from spin_space_averaging.sqs import SQS
 from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
 from pyiron_base.job.util import _get_safe_job_name
 
@@ -118,19 +118,22 @@ class SSA:
         indices = np.arange(len(structure))
         if nonmag_ids is not None:
             indices = np.delete(indices, nonmag_ids)
-        sqs = SQSInteractive(
-            structure=structure[indices],
-            concentration=0.5,
-            cutoff=cutoff,
-            n_copy=n_copy,
-            sigma=sigma,
-            max_sigma=max_sigma,
-            n_points=n_points,
-            min_sample_value=min_sample_value
-        )
-        sqs.run_mc(n_steps)
+        job_name = _get_safe_job_name((
+            'sqs',
+            self._structure_job_name,
+        ))
+        sqs = self.project.create_job(SQS, job_name)
+        sqs.input.concentration = 0.5
+        sqs.input.cutoff = cutoff
+        sqs.input.n_copy = n_copy
+        sqs.input.sigma = sigma
+        sqs.input.max_sigma = max_sigma
+        sqs.input.n_points = n_points
+        sqs.input.min_sample_value = min_sample_value
+        if sqs.status.initialized:
+            sqs.run()
         magmoms = np.zeros((n_copy, len(structure)))
-        magmoms.T[indices] = sqs.spins.T
+        magmoms.T[indices] = sqs.output.spins.T
         return magmoms
 
     @property
