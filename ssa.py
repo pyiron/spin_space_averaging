@@ -31,6 +31,7 @@ def get_asym_sum(*args):
 class SSA:
     def __init__(self, project, name):
         self._project = project.create_group(name)
+        self._output = Output(self)
         self._lmp_structure_zero = None
         self._lmp_structure = None
         self._symmetry = None
@@ -54,6 +55,7 @@ class SSA:
             self.input.sqs.n_points = 200
             self.input.sqs.min_sample_value = 1.0e-8
             self.input.sqs.n_steps = 10000
+            self.input.sqs.snapshots = None
             self.input.create_group('init_hessian')
             self.input.init_hessian.phonon = None
             self.input.init_hessian.magnon = None
@@ -138,8 +140,8 @@ class SSA:
 
     @property
     def sqs(self):
-        if self.output['sqs'] is None:
-            self.output['sqs'] = self.get_sqs(
+        if self.input.sqs.snapshots is None:
+            self.input.sqs.snapshots = self.get_sqs(
                 self.structure,
                 self.input.sqs.cutoff,
                 self.input.n_copy,
@@ -151,7 +153,7 @@ class SSA:
                 min_sample_value=self.input.sqs.min_sample_value
             )
             self.sync()
-        return self.output['sqs']
+        return self.input.sqs.snapshots
 
     def set_input(
         self,
@@ -406,12 +408,15 @@ class SSA:
 
     @property
     def output(self):
-        if 'output' not in self.project.data:
-            self.project.data.create_group('output')
-        return self.project.data.output
+        return self._output
 
     def sync(self):
         self.project.data.write()
+
+
+class Output:
+    def __init__(self, ref_job):
+        self._job = ref_job
 
 
 class Project(PyironProject):
