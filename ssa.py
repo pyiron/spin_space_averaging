@@ -85,7 +85,7 @@ class SSA:
         results += get_asym_sum(
             *[ord(s) for s in ''.join(box.get_chemical_symbols())]
         )
-        return results        
+        return results
 
     def set_nonmag_atoms(self, ids):
         self.input.nonmag_atoms = ids
@@ -99,7 +99,7 @@ class SSA:
 
     @structure.setter
     def structure(self, new_structure):
-        self.input['structure'] = structure
+        self.input['structure'] = new_structure
         self.sync()
 
     def get_symmetry(self, structure, symprec):
