@@ -1,9 +1,8 @@
-from pyiron_atomistics import Project as PyironProject
 import numpy as np
 from collections import defaultdict
 from spin_space_averaging.sqs import SQS
 from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
-from pyiron_base.job.util import _get_safe_job_name
+from pyiron_base.jobs.job.util import _get_safe_job_name
 
 
 def get_bfgs(s, y, H):
@@ -28,21 +27,100 @@ def get_asym_sum(*args):
     ])
 
 
+def struct_to_tag(structure):
+    d = structure.get_distances_array(structure.positions, structure.positions)
+    indices = np.triu_indices(len(d), 1)
+    d = np.log(d[indices])
+    c = structure.get_chemical_symbols()[np.stack(indices, axis=-1)]
+    d_round = np.round(d, decimals=8)
+    Jij = [np.sum([ord(ccc) for ccc in ''.join(np.sort(cc))]) for cc in c]
+    E = np.sum(Jij * d_round)
+    cell = np.round(structure.cell, decimals=8)
+    arr = tuple(structure.pbc) + tuple(cell.flatten()) + (E, )
+    return np.log(np.absolute(hash(arr)))
+
+
+class Lammps:
+    def __init__(self, ref_job):
+        self._ref_job = ref_job
+        self._structure = None
+
+    @property
+    def project(self):
+        return self._ref_job.project
+
+    def get_hessian(self, structure, potential=None):
+        lmp = self.project.create.job.Lammps((
+            'lmp', struct_to_tag(structure)
+        ))
+        lmp.structure = self._get_minimize(
+            structure, potential=potential, pressure=np.zeros(3)
+        )
+        if potential is not None:
+            lmp.potential = potential
+        lmp.interactive_open()
+        qha = self.project.create_job(
+            QuasiHarmonicApproximation, 'qha_' + lmp.job_name
+        )
+        qha.ref_job = lmp
+        qha.input['num_points'] = 1
+        if qha.status.initialized:
+            qha.run()
+        return qha['output/force_constants'][0]
+
+    def _get_minimize(
+        self, structure, potential=None, symmetry=None, pressure=None
+    ):
+        job_name = ('lmp_relax', struct_to_tag(structure), pressure)
+        if pressure is not None:
+            job_name = ('lmp_relax', struct_to_tag(structure), *pressure)
+        job = self.project.create.job.Lammps(job_name)
+        if symmetry is None:
+            symmetry = structure.get_symmetry()
+        job.structure = structure
+        if potential is not None:
+            job.potential = potential
+        job.calc_minimize(pressure=pressure)
+        if job.status.initialized:
+            job.run()
+        final_structure = job.get_structure()
+        dx = final_structure.get_scaled_positions() - structure.get_scaled_positions()
+        dx -= np.rint(dx)
+        dx = np.einsum('ji,nj->ni', final_structure.cell, dx)
+        structure = structure.apply_strain(
+            np.einsum(
+                'ij,jk->ik',
+                final_structure.cell,
+                np.linalg.inv(structure.cell)
+            ) - np.eye(3)
+        )
+        structure.positions += symmetry.symmetrize_vectors(dx)
+        return structure.center_coordinates_in_unit_cell()
+
+    @property
+    def structure(self):
+        if self._structure is None:
+            self._structure = self._get_minimize(
+                self.structure,
+                self.input.lammps['potential'],
+                self.symmetry,
+                None
+            )
+        return self._structure
+
+
 class SSA:
     def __init__(self, project, name):
         self._project = project.create_group(name)
         self._output = Output(self)
-        self._lmp_structure_zero = None
-        self._lmp_structure = None
+        self.lammps = Lammps(self)
         self._symmetry = None
         self.all_jobs = {}
         self._initial_hessian = None
-        self._lmp_hessian = None
         try:
             self.project.data.read()
         except KeyError:
             self.input.n_copy = 8
-            self.input.structure = None
             self.input.nonmag_atoms = None
             self.input.create_group('lammps')
             self.input.lammps.potential = None
@@ -70,22 +148,19 @@ class SSA:
             self.input.create_group('convergence')
             self.input.convergence.phonon_force = 1.0e-2
             self.input.convergence.magnon_force = 1.0e-1
+            self.input.convergence.max_steps = 100
             self.sync()
 
+    @property
     def _dft_job_name(self):
         dft = self.input.dft
         return get_asym_sum(
             [dft[k] for k in dft.list_nodes() if k != 'n_cores']
         )
 
+    @property
     def _structure_job_name(self):
-        box = self.structure
-        results = get_asym_sum(*box.positions.flatten())
-        results += get_asym_sum(*box.cell.flatten())
-        results += get_asym_sum(
-            *[ord(s) for s in ''.join(box.get_chemical_symbols())]
-        )
-        return results
+        return struct_to_tag(self.structure)
 
     def set_nonmag_atoms(self, ids):
         self.input.nonmag_atoms = ids
@@ -93,13 +168,14 @@ class SSA:
 
     @property
     def structure(self):
-        if self.input['structure'] is None:
-            raise AssertionError('Structure not set')
-        return self.input['structure']
+        try:
+            return self.input.structure
+        except AttributeError:
+            raise AssertionError('structure not defined')
 
     @structure.setter
     def structure(self, new_structure):
-        self.input['structure'] = new_structure
+        self.input.structure = new_structure
         self.sync()
 
     def get_symmetry(self, structure, symprec):
@@ -125,6 +201,7 @@ class SSA:
             self._structure_job_name,
         ))
         sqs = self.project.create_job(SQS, job_name)
+        sqs.structure = structure
         sqs.input.concentration = 0.5
         sqs.input.cutoff = cutoff
         sqs.input.n_copy = n_copy
@@ -183,15 +260,6 @@ class SSA:
         job.server.queue = 'cm'
         job.calc_static()
 
-    def lmp_hessian(self):
-        if self.input.init_hessian.phonon is not None:
-            return self.input.init_hessian.phonon
-        if self._lmp_hessian is None:
-            self._lmp_hessian = self.get_lmp_hessian(
-                self.structure, self.input.lammps.potential
-            )
-        return self._lmp_hessian
-
     @property
     def symmetry(self):
         if self._symmetry is None:
@@ -199,61 +267,6 @@ class SSA:
                 self.structure, self.input.symmetry.symprec
             )
         return self._symmetry
-
-    def get_lmp_hessian(self, structure, potential=None):
-        lmp = self.project.create.job.Lammps(('lmp', self._structure_job_name))
-        lmp.structure = structure
-        if potential is not None:
-            lmp.potential = potential
-        lmp.interactive_open()
-        qha = self.project.create_job(
-            QuasiHarmonicApproximation, 'qha_' + lmp.job_name
-        )
-        qha.ref_job = lmp
-        qha.input['num_points'] = 1
-        if qha.status.initialized:
-            qha.run()
-        return qha['output/force_constants'][0]
-
-    def _get_lmp_minimize(
-        self, structure, potential=None, symmetry=None, pressure=None
-    ):
-        job_name = ('lmp_relax', self._structure_job_name, pressure)
-        if pressure is not None:
-            job_name = ('lmp_relax', self._structure_job_name, *pressure)
-        job = self.project.create.job.Lammps(job_name)
-        if symmetry is None:
-            symmetry = structure.get_symmetry()
-        job.structure = structure
-        if potential is not None:
-            job.potential = potential
-        job.calc_minimize(pressure=pressure)
-        if job.status.initialized:
-            job.run()
-        final_structure = job.get_structure()
-        dx = final_structure.get_scaled_positions() - structure.get_scaled_positions()
-        dx -= np.rint(dx)
-        dx = np.einsum('ji,nj->ni', final_structure.cell, dx)
-        structure = structure.apply_strain(
-            np.einsum(
-                'ij,jk->ik',
-                final_structure.cell,
-                np.linalg.inv(structure.cell)
-            ) - np.eye(3)
-        )
-        structure.positions += symmetry.symmetrize_vectors(dx)
-        return structure.center_coordinates_in_unit_cell()
-
-    @property
-    def lmp_structure(self):
-        if self._lmp_structure is None:
-            self._lmp_structure = self._get_lmp_minimize(
-                self.structure,
-                self.input.lammps['potential'],
-                self.symmetry,
-                None
-            )
-        return self._lmp_structure
 
     @property
     def init_magmom_jobs(self):
@@ -264,18 +277,19 @@ class SSA:
         is_running = False
         job_lst = []
         for magnitude in self.atleast_1d(self.input.init_hessian.magnetic_moments):
-            for magmoms in self.sqs:
-                job_name = _get_safe_job_name((
+            for j, magmoms in enumerate(self.sqs):
+                job_name = (
                     'spx',
                     self._structure_job_name,
                     self._dft_job_name,
-                    get_asym_sum(magmoms),
-                    magnitude
-                ))
+                    magnitude,
+                    get_asym_sum(self.sqs.flatten()),
+                    j,
+                )
                 spx = self.get_job(job_name)
                 if spx is None:
                     spx = self.project.create.job.Sphinx(job_name)
-                    spx.structure = self.lmp_structure.copy()
+                    spx.structure = self.lammps.structure.copy()
                     spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
                     self.set_input(spx)
                     if spx.status.initialized:
@@ -287,7 +301,16 @@ class SSA:
         return job_lst
 
     @property
-    def initial_hessian_mag(self):
+    def initial_hessian_phonon(self):
+        if self.input.init_hessian.phonon is not None:
+            return self.input.init_hessian.phonon
+        return self.lammps.get_hessian(
+            self.structure,
+            self.input.lammps.potential
+        )
+
+    @property
+    def initial_hessian_magnon(self):
         if self.input.init_hessian['magnon'] is None:
             if self.input.init_hessian.magnetic_moments is None:
                 raise ValueError(
@@ -297,9 +320,12 @@ class SSA:
             if job_lst is None:
                 return
             output = self.get_output(
-                job_lst, (len(self.input.init_hessian.magnetic_moments), -1)
+                job_lst, (
+                    len(self.input.init_hessian.magnetic_moments),
+                    len(self.sqs)
+                )
             )
-            self.input.init_hessian['magnon'] = self.get_initial_hessian_mag(
+            self.input.init_hessian['magnon'] = self.get_initial_hessian_magnon(
                 output['nu'],
                 output['magmoms'],
                 self.symmetry,
@@ -310,23 +336,22 @@ class SSA:
     @property
     def initial_hessian(self):
         if self._initial_hessian is None:
-            H_phonon = self.input_hessian.phonon
-            H_magnon = self.initial_hessian_mag
-            if H_phonon is None or H_magnon is None:
-                return None
             self._initial_hessian = self.get_initial_hessian(
-                H_phonon=H_phonon, H_magnon=H_magnon
+                H_phonon=self.initial_hessian_phonon,
+                H_magnon=self.initial_hessian_magnon
             )
-        return self._initial_hessian
+        return self._initial_hessian.copy()
 
     def get_initial_hessian(self, H_phonon, H_magnon):
+        if H_phonon is None or H_magnon is None:
+            return None
         n = (len(H_phonon) + len(H_magnon)) // 4
         H = np.eye(4 * n)
         H[:3 * n, :3 * n] = H_phonon.copy()
         H[3 * n:, 3 * n:] *= H_magnon
         return H
 
-    def get_initial_hessian_mag(
+    def get_initial_hessian_magnon(
         self, magnetic_forces, magmoms, symmetry, weights=None
     ):
         """
@@ -344,17 +369,6 @@ class SSA:
             np.mean(H, axis=0)[symmetry.permutations], axis=0
         )
 
-    @property
-    def lmp_structure_zero(self):
-        if self._lmp_structure_zero is None:
-            self._lmp_structure_zero = self._get_lmp_minimize(
-                self.structure,
-                self.input.lammps['potential'],
-                self.symmetry,
-                [0, 0, 0]
-            )
-        return self._lmp_structure_zero
-
     def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
         if signs is None:
             signs = np.sign(magmoms)
@@ -366,12 +380,13 @@ class SSA:
         ], axis=1).squeeze()
 
     def get_job(self, job_name):
+        job_name = _get_safe_job_name(job_name)
         if job_name not in list(self.all_job.keys()):
             if job_name not in list(self.project.job_table().jobs):
                 return
             job = self.project.load(job_name)
             if job.status.running:
-                return None
+                return
             self.all_job[job_name] = job
         return self.all_job[job_name]
 
@@ -413,17 +428,6 @@ class SSA:
     def sync(self):
         self.project.data.write()
 
-
-class Output:
-    def __init__(self, ref_job):
-        self._job = ref_job
-
-
-class Project(PyironProject):
-    """
-    Welcome to the Spin Space Average workflow
-    """
-
     def update_hessian(
         self,
         structure,
@@ -434,6 +438,8 @@ class Project(PyironProject):
         forces,
         symmetry=None
     ):
+        if len(magmoms) == 1:
+            return hessian
         if symmetry is None:
             symmetry = structure.get_symmetry()
         nu = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
@@ -450,7 +456,7 @@ class Project(PyironProject):
             new_hessian += get_bfgs(xx, ff, new_hessian)
         return new_hessian
 
-    def get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
+    def _get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
             if magmoms is not None:
                 magnetic_forces = self.symmetrize_magmoms(
@@ -463,3 +469,97 @@ class Project(PyironProject):
         dx = -xm_new[:3 * forces.shape[-2]].reshape(-1, 3)
         dm = -xm_new[3 * forces.shape[-2]:]
         return dx, dm
+
+    def _check_convergence(self, f, nu, m):
+        f_sym = self.symmetry.symmetrize_vectors(f.mean(axis=0))
+        if np.linalg.norm(
+            f_sym, axis=-1
+        ).max() > self.input.convergence.phonon_force:
+            return False
+        nu_sym = self.symmetrize_magmoms(self.symmetry, nu, m)
+        return np.absolute(nu_sym).max() < self.input.convergence.magnon_force
+
+    def _run_next(self, job_lst):
+        output = self.get_output(job_lst, (-1, len(self.sqs)))
+        if self._check_convergence(
+            output['forces'][-1], output['nu'][-1], output['magmoms'][-1]
+        ):
+            return
+        hessian = self.update_hessian(
+            self.structure,
+            self.initial_hessian,
+            output['nu'],
+            output['magmoms'],
+            output['positions'],
+            output['forces'],
+            self.symmetry
+        )
+        dx, dm = self.get_dx(
+            hessian,
+            output['forces'][-1],
+            output['nu'][-1],
+            self.symmetry,
+            output['magmoms'][-1]
+        )
+        for ii, spx_old in enumerate(job_lst[-len(self.sqs):]):
+            new_job_name = spx_old.job_name.split('_')
+            new_job_name[-2] = str(int(new_job_name[-2] + 1))
+            spx = self.project.create.job.Sphinx('_'.join(new_job_name))
+            if not spx.status.initialized:
+                continue
+            spx.structure = spx_old.structure.copy()
+            spx.structure.positions += dx
+            m = spx_old.structure.get_initial_magnetic_moments()
+            spx.structure.set_initial_magnetic_moments(m + np.sign(m) * dm)
+            self.set_input(spx)
+            spx.run()
+
+    @property
+    def qn_job_lst(self):
+        job_lst = []
+        if self.input.init_hessian.magnetic_moments is not None:
+            magmom_jobs = self.init_magmom_jobs
+            if magmom_jobs is None:
+                return None
+            m = self.input.init_hessian.magnetic_moments
+            output = self.get_output(magmom_jobs, (len(m), -1))
+            i = np.argmin(output['energy'].mean(axis=0))
+            job_lst = [magmom_jobs[i * len(m):(i + 1) * len(m)]]
+        for i in range(self.input.convergence.max_steps):
+            job_lst_tmp = []
+            for j, magmoms in enumerate(self.sqs):
+                job_tmp = self.get_job((
+                    'spx',
+                    self._structure_job_name,
+                    self._dft_job_name,
+                    get_asym_sum(self.sqs.flatten()),
+                    i,
+                    j,
+                ))
+                if job_tmp is None:
+                    break
+                job_lst_tmp.append(job_tmp)
+            if len(job_lst_tmp) == len(self.sqs):
+                job_lst.append(job_lst_tmp)
+        self._run_next(job_lst)
+        return job_lst
+
+
+class Output:
+    def __init__(self, ref_job):
+        self._job = ref_job
+
+    @property
+    def all_energy(self):
+        if self._job.qn_job_lst is None:
+            return None
+        return np.einsum(
+            'ijk->jki',
+            [job.output.energy_pot for job in self._job.qn_job_lst]
+        )
+
+    @property
+    def energy(self):
+        if self._job.qn_job_lst is None:
+            return None
+        return np.mean(self.all_energy, axis=-1)
