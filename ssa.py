@@ -21,7 +21,7 @@ def get_bfgs(s, y, H):
     return dH
 
 
-def get_asym_sum(*args):
+def get_asym_sum(args):
     return np.sum([
         np.sin(ii + 2) * arg for ii, arg in enumerate(args)
     ])
@@ -92,7 +92,8 @@ class Lammps:
                 'ij,jk->ik',
                 final_structure.cell,
                 np.linalg.inv(structure.cell)
-            ) - np.eye(3)
+            ) - np.eye(3),
+            return_box=True
         )
         structure.positions += symmetry.symmetrize_vectors(dx)
         return structure.center_coordinates_in_unit_cell()
@@ -101,9 +102,9 @@ class Lammps:
     def structure(self):
         if self._structure is None:
             self._structure = self._get_minimize(
-                self.structure,
-                self.input.lammps['potential'],
-                self.symmetry,
+                self._ref_job.structure,
+                self._ref_job.input.lammps['potential'],
+                self._ref_job.symmetry,
                 None
             )
         return self._structure
@@ -115,7 +116,7 @@ class SSA:
         self._output = Output(self)
         self.lammps = Lammps(self)
         self._symmetry = None
-        self.all_jobs = {}
+        self._all_jobs = {}
         self._initial_hessian = None
         try:
             self.project.data.read()
@@ -155,7 +156,7 @@ class SSA:
     def _dft_job_name(self):
         dft = self.input.dft
         return get_asym_sum(
-            [dft[k] for k in dft.list_nodes() if k != 'n_cores']
+            [dft[k] for k in sorted(dft.list_nodes()) if k != 'n_cores']
         )
 
     @property
@@ -276,7 +277,7 @@ class SSA:
             )
         is_running = False
         job_lst = []
-        for magnitude in self.atleast_1d(self.input.init_hessian.magnetic_moments):
+        for magnitude in np.atleast_1d(self.input.init_hessian.magnetic_moments):
             for j, magmoms in enumerate(self.sqs):
                 job_name = (
                     'spx',
@@ -381,14 +382,14 @@ class SSA:
 
     def get_job(self, job_name):
         job_name = _get_safe_job_name(job_name)
-        if job_name not in list(self.all_job.keys()):
-            if job_name not in list(self.project.job_table().jobs):
+        if job_name not in list(self._all_jobs.keys()):
+            if job_name not in list(self.project.job_table().job):
                 return
             job = self.project.load(job_name)
             if job.status.running:
                 return
-            self.all_job[job_name] = job
-        return self.all_job[job_name]
+            self._all_jobs[job_name] = job
+        return self._all_jobs[job_name]
 
     def get_output(self, job_list, shape=None):
         output = defaultdict(list)
@@ -404,6 +405,7 @@ class SSA:
             output['positions'].append(job['output/generic/positions'][0])
         if shape is not None:
             output['energy'] = np.reshape(output['energy'], shape)
+            shape = output['energy'].shape
             output['ediff'] = np.reshape(output['ediff'], shape)
             output['magmoms'] = np.reshape(output['magmoms'], shape + (-1,))
             output['nu'] = np.reshape(output['nu'], shape + (-1,))
@@ -517,7 +519,12 @@ class SSA:
     @property
     def qn_job_lst(self):
         job_lst = []
-        if self.input.init_hessian.magnetic_moments is not None:
+        if self.input.init_hessian.magnetic_moments is None:
+            if self.input.init_hessian.magnon is None:
+                raise AssertionError(
+                    'Either magnon Hessian or magmoms must be defined'
+                )
+        else:
             magmom_jobs = self.init_magmom_jobs
             if magmom_jobs is None:
                 return None
@@ -540,7 +547,7 @@ class SSA:
                     break
                 job_lst_tmp.append(job_tmp)
             if len(job_lst_tmp) == len(self.sqs):
-                job_lst.append(job_lst_tmp)
+                job_lst.extend(job_lst_tmp)
         self._run_next(job_lst)
         return job_lst
 
