@@ -597,6 +597,6 @@ class Output:
         if self._job.qn_job_lst is None:
             return None
         return np.array([
-            self.symmetry.symmetrize_vectors(f.mean(axis=0))
+            self._job.symmetry.symmetrize_vectors(f.mean(axis=0))
             for f in self.all_forces
         ])
