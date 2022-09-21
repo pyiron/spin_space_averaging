@@ -327,8 +327,10 @@ class SSA:
                 )
             )
             self.input.init_hessian['magnon'] = self.get_initial_hessian_magnon(
-                output['nu'],
-                output['magmoms'],
+                self.symmetrize_magmoms(
+                    self.symmetry, output['nu'], output['magmoms']
+                ),
+                self.symmetrize_magmoms(self.symmetry, output['magmoms']),
                 self.symmetry,
             )
             self.sync()
@@ -366,9 +368,7 @@ class SSA:
         n = np.einsum('ij,i->j', magnetic_forces, weights)
         w = np.sum(weights)
         H = (w * mn - m * n) / (w * mm - m**2)
-        return np.mean(
-            np.mean(H, axis=0)[symmetry.permutations], axis=0
-        )
+        return np.mean(H[symmetry.permutations], axis=0)
 
     def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
         if signs is None:
@@ -492,21 +492,33 @@ class SSA:
             self.initial_hessian,
             output['nu'],
             output['magmoms'],
-            output['positions'],
+            output['positions'][:, 0],
             output['forces'],
             self.symmetry
         )
-        dx, dm = self.get_dx(
+        dx, dm = self._get_dx(
             hessian,
             output['forces'][-1],
             output['nu'][-1],
             self.symmetry,
             output['magmoms'][-1]
         )
-        for ii, spx_old in enumerate(job_lst[-len(self.sqs):]):
+        for ii, job_name in enumerate(job_lst[-len(self.sqs):]):
+            spx_old = self.get_job(job_name)
             new_job_name = spx_old.job_name.split('_')
-            new_job_name[-2] = str(int(new_job_name[-2] + 1))
-            spx = self.project.create.job.Sphinx('_'.join(new_job_name))
+            try:
+                new_job_name[-2] = str(int(new_job_name[-2]) + 1)
+                new_job_name = '_'.join(new_job_name)
+            except:
+                new_job_name = (
+                    'spx',
+                    self._structure_job_name,
+                    self._dft_job_name,
+                    get_asym_sum(self.sqs.flatten()),
+                    0,
+                    ii,
+                )
+            spx = self.project.create.job.Sphinx(new_job_name)
             if not spx.status.initialized:
                 continue
             spx.structure = spx_old.structure.copy()
@@ -531,7 +543,7 @@ class SSA:
             m = self.input.init_hessian.magnetic_moments
             output = self.get_output(magmom_jobs, (len(m), -1))
             i = np.argmin(output['energy'].mean(axis=0))
-            job_lst = [magmom_jobs[i * len(m):(i + 1) * len(m)]]
+            job_lst = magmom_jobs[i * len(m):i * len(m) + len(self.sqs)]
         for i in range(self.input.convergence.max_steps):
             job_lst_tmp = []
             for j, magmoms in enumerate(self.sqs):
@@ -545,11 +557,13 @@ class SSA:
                 ))
                 if job_tmp is None:
                     break
-                job_lst_tmp.append(job_tmp)
+                job_lst_tmp.append(job_tmp.job_name)
             if len(job_lst_tmp) == len(self.sqs):
                 job_lst.extend(job_lst_tmp)
+            else:
+                break
         self._run_next(job_lst)
-        return job_lst
+        return [self.get_job(job) for job in job_lst]
 
 
 class Output:
@@ -560,13 +574,29 @@ class Output:
     def all_energy(self):
         if self._job.qn_job_lst is None:
             return None
-        return np.einsum(
-            'ijk->jki',
-            [job.output.energy_pot for job in self._job.qn_job_lst]
-        )
+        return np.reshape([
+            job.output.energy_pot for job in self._job.qn_job_lst
+        ], (-1, self._job.input.n_copy))
 
     @property
     def energy(self):
         if self._job.qn_job_lst is None:
             return None
         return np.mean(self.all_energy, axis=-1)
+
+    @property
+    def all_forces(self):
+        if self._job.qn_job_lst is None:
+            return None
+        return np.reshape([
+            job.output.forces for job in self._job.qn_job_lst
+        ], (-1, self._job.input.n_copy, len(self._job.structure), 3))
+
+    @property
+    def forces(self):
+        if self._job.qn_job_lst is None:
+            return None
+        return np.array([
+            self.symmetry.symmetrize_vectors(f.mean(axis=0))
+            for f in self.all_forces
+        ])
