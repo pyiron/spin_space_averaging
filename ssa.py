@@ -194,9 +194,6 @@ class SSA:
         n_points=100,
         min_sample_value=1.0e-8
     ):
-        indices = np.arange(len(structure))
-        if nonmag_ids is not None:
-            indices = np.delete(indices, nonmag_ids)
         job_name = _get_safe_job_name((
             'sqs',
             self._structure_job_name,
@@ -213,7 +210,9 @@ class SSA:
         if sqs.status.initialized:
             sqs.run()
         magmoms = np.zeros((n_copy, len(structure)))
-        magmoms.T[indices] = sqs.output.spins.T
+        magmoms = sqs.output.spins
+        if nonmag_ids is not None:
+            magmoms[:, nonmag_ids] *= 0
         return magmoms
 
     @property
@@ -368,6 +367,8 @@ class SSA:
         n = np.einsum('ij,i->j', magnetic_forces, weights)
         w = np.sum(weights)
         H = (w * mn - m * n) / (w * mm - m**2)
+        if self.input.nonmag_atoms is not None:
+            H[self.input.nonmag_atoms] = 1
         return np.mean(H[symmetry.permutations], axis=0)
 
     def symmetrize_magmoms(self, symmetry, magmoms, signs=None):
@@ -529,7 +530,7 @@ class SSA:
             spx.run()
 
     @property
-    def qn_job_lst(self):
+    def _qn_job_lst(self):
         job_lst = []
         if self.input.init_hessian.magnetic_moments is None:
             if self.input.init_hessian.magnon is None:
@@ -541,7 +542,7 @@ class SSA:
             if magmom_jobs is None:
                 return None
             m = self.input.init_hessian.magnetic_moments
-            output = self.get_output(magmom_jobs, (len(m), -1))
+            output = self.get_output(magmom_jobs, (-1, len(m)))
             i = np.argmin(output['energy'].mean(axis=0))
             job_lst = magmom_jobs[i * len(m):i * len(m) + len(self.sqs)]
         for i in range(self.input.convergence.max_steps):
@@ -562,6 +563,13 @@ class SSA:
                 job_lst.extend(job_lst_tmp)
             else:
                 break
+        return job_lst
+
+    @property
+    def qn_job_lst(self):
+        job_lst = self._qn_job_lst
+        if job_lst is None:
+            return None
         self._run_next(job_lst)
         return [self.get_job(job) for job in job_lst]
 
