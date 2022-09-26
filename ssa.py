@@ -558,6 +558,8 @@ class SSA:
                 ))
                 if job_tmp is None:
                     break
+                if job_tmp.status not in ['finished', 'not_converged']:
+                    break
                 job_lst_tmp.append(job_tmp.job_name)
             if len(job_lst_tmp) == len(self.sqs):
                 job_lst.extend(job_lst_tmp)
