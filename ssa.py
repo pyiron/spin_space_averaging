@@ -382,15 +382,16 @@ class SSA:
 
     def get_job(self, job_name):
         job_name = _get_safe_job_name(job_name)
-        if job_name not in list(self._all_jobs.keys()):
-            if job_name not in list(self.project.job_table().job):
+        try:
+            return self._all_jobs[job_name]
+        except KeyError:
+            jt = self.project.job_table().job
+            if job_name not in list(jt.job):
                 return
-            if job_name in list(self.project.job_table(status='submitted').job):
-                return
-            if job_name in list(self.project.job_table(status='running').job):
+            if job_name in list(jt[jt.status='submitted'].job) + list(jt[jt.status='running'].job):
                 return
             self._all_jobs[job_name] = self.project.load(job_name)
-        return self._all_jobs[job_name]
+            return self._all_jobs[job_name]
 
     def get_output(self, job_list, shape=None):
         output = defaultdict(list)
