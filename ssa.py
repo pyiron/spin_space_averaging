@@ -385,7 +385,7 @@ class SSA:
         try:
             return self._all_jobs[job_name]
         except KeyError:
-            jt = self.project.job_table().job
+            jt = self.project.job_table()
             if job_name not in list(jt.job):
                 return
             if job_name in (
