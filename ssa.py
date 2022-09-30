@@ -340,7 +340,8 @@ class SSA:
                 self.symmetrize_magmoms(self.symmetry, output['magmoms']),
                 self.symmetry,
             )
-            assert np.all(self.input.init_hessian['magnon'] > 0)
+            if np.any(self.input.init_hessian['magnon'] <= 0):
+                raise ValueError('Negative curvature detected:', self.input.init_hessian['magnon'])
             self.sync()
         return self.input.init_hessian['magnon']
 
@@ -377,6 +378,7 @@ class SSA:
         w = np.sum(weights)
         H = (w * mn - m * n) / (w * mm - m**2)
         if self.input.nonmag_atoms is not None:
+            # Any positive number to make sure that the inverse matrix is well defined
             H[self.input.nonmag_atoms] = 1
         return np.mean(H[symmetry.permutations], axis=0)
 
