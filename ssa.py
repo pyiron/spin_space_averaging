@@ -124,6 +124,7 @@ class SSA:
             self.input.nonmag_atoms = None
             self.input.create_group('lammps')
             self.input.lammps.potential = None
+            self.input.lammps.use_lammps = True
             self.input.create_group('symmetry')
             self.input.symmetry.symprec = 1e-05
             self.input.create_group('sqs')
@@ -178,6 +179,15 @@ class SSA:
         self.input.structure = new_structure
         self.sync()
 
+    @property
+    def _relaxed_structure(self):
+        try: # backward compatibility
+            if not self.input.lammps.use_lammps:
+                return self.structure
+        except:
+            pass
+        return self.lammps.structure
+
     def get_symmetry(self, structure, symprec):
         return structure.get_symmetry(symprec=symprec)
 
@@ -218,7 +228,7 @@ class SSA:
     def sqs(self):
         if self.input.sqs.snapshots is None:
             self.input.sqs.snapshots = self.get_sqs(
-                self.structure,
+                self._relaxed_structure,
                 self.input.sqs.cutoff,
                 self.input.n_copy,
                 nonmag_ids=self.input.nonmag_atoms,
@@ -287,7 +297,7 @@ class SSA:
                 )
                 if self.get_job(job_name) is None:
                     spx = self.project.create.job.Sphinx(job_name)
-                    spx.structure = self.lammps.structure.copy()
+                    spx.structure = self._relaxed_structure.copy()
                     spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
                     self.set_input(spx)
                     if spx.status.initialized:
