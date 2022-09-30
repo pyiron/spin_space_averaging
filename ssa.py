@@ -113,7 +113,6 @@ class Lammps:
 class SSA:
     def __init__(self, project, name):
         self._project = project.create_group(name)
-        self._output = Output(self)
         self.lammps = Lammps(self)
         self._symmetry = None
         self._all_jobs = {}
@@ -318,7 +317,7 @@ class SSA:
             job_lst = self.init_magmom_jobs
             if job_lst is None:
                 return
-            output = self.get_output(
+            output = self.get_job_output(
                 job_lst, (
                     len(self.input.init_hessian.magnetic_moments),
                     len(self.sqs)
@@ -397,7 +396,7 @@ class SSA:
             self._all_jobs[job_name] = self.project.load(job_name)
             return self._all_jobs[job_name]
 
-    def get_output(self, job_list, shape=None):
+    def get_job_output(self, job_list, shape=None):
         output = defaultdict(list)
         assert shape is None or isinstance(shape, tuple)
         for job_name in job_list:
@@ -432,10 +431,6 @@ class SSA:
             self.project.data.create_group('input')
         return self.project.data.input
 
-    @property
-    def output(self):
-        return self._output
-
     def sync(self):
         self.project.data.write()
 
@@ -462,10 +457,10 @@ class SSA:
         x_diff = structure.find_mic(x_diff).reshape(-1, 3 * len(structure))
         x_diff = np.append(x_diff, np.diff(magmoms, axis=0), axis=1)
         dUdx = np.append(-f_sym, nu, axis=1)
-        new_hessian = hessian.copy()
+        new_hessian = [hessian.copy()]
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
-            new_hessian += get_bfgs(xx, ff, new_hessian)
-        return new_hessian
+            new_hessian.append(get_bfgs(xx, ff, new_hessian[-1]))
+        return np.asarray(new_hessian)
 
     def _get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
@@ -474,12 +469,12 @@ class SSA:
                     symmetry, magnetic_forces, magmoms
                 )
             forces = symmetry.symmetrize_vectors(forces.mean(axis=0))
-        xm_new = np.einsum(
-            'ij,j->i', np.linalg.inv(hessian), np.append(-forces, magnetic_forces)
-        )
-        dx = -xm_new[:3 * forces.shape[-2]].reshape(-1, 3)
-        dm = -xm_new[3 * forces.shape[-2]:]
-        return dx, dm
+        dx, dm = [], []
+        for h, f, m in zip(hessian, forces, magnetic_forces):
+            xm_new = np.einsum('ij,j->i', np.linalg.inv(h), np.append(-f, m))
+            dx.append(-xm_new[:3 * forces.shape[-2]].reshape(-1, 3))
+            dm.append(-xm_new[3 * forces.shape[-2]:])
+        return np.asarray(dx), np.asarray(dm)
 
     def _check_convergence(self, f, nu, m):
         f_sym = self.symmetry.symmetrize_vectors(f.mean(axis=0))
@@ -492,25 +487,9 @@ class SSA:
 
     def _run_next(self, job_lst, output):
         if self._check_convergence(
-            output['forces'][-1], output['nu'][-1], output['magmoms'][-1]
+            output.forces[-1], output.nu[-1], output.magmoms[-1]
         ):
             return
-        hessian = self.update_hessian(
-            self.structure,
-            self.initial_hessian,
-            output['nu'],
-            output['magmoms'],
-            output['positions'][:, 0],
-            output['forces'],
-            self.symmetry
-        )
-        dx, dm = self._get_dx(
-            hessian,
-            output['forces'][-1],
-            output['nu'][-1],
-            self.symmetry,
-            output['magmoms'][-1]
-        )
         for ii, job_name in enumerate(job_lst[-len(self.sqs):]):
             spx_old = self.get_job(job_name)
             new_job_name = spx_old.job_name.split('_')
@@ -530,9 +509,9 @@ class SSA:
             spx = self.project.create.job.Sphinx(new_job_name)
             if not spx.status.initialized: continue
             spx.structure = spx_old.structure.copy()
-            spx.structure.positions += dx
+            spx.structure.positions += output.dx[-1]
             m = spx_old.structure.get_initial_magnetic_moments()
-            spx.structure.set_initial_magnetic_moments(m + np.sign(m) * dm)
+            spx.structure.set_initial_magnetic_moments(m + np.sign(m) * output.dm[-1])
             self.set_input(spx)
             spx.run()
 
@@ -548,7 +527,7 @@ class SSA:
             magmom_jobs = self.init_magmom_jobs
             if magmom_jobs is None: return None
             m = self.input.init_hessian.magnetic_moments
-            output = self.get_output(magmom_jobs, (-1, len(m)))
+            output = self.get_job_output(magmom_jobs, (-1, len(m)))
             i = np.argmin(output['energy'].mean(axis=0))
             job_lst = magmom_jobs[i * len(m):i * len(m) + len(self.sqs)]
         for i in range(self.input.convergence.max_steps):
@@ -570,48 +549,92 @@ class SSA:
             else: break
         return job_lst
 
-    @property
-    def qn_output(self):
+    def get_output(self):
         job_lst = self._qn_job_lst
         if job_lst is None: return None
-        output = self.get_output(job_lst, (-1, len(self.sqs)))
+        job_output = self.get_job_output(job_lst, (-1, len(self.sqs)))
+        output = Output(self, job_output)
         self._run_next(job_lst, output)
         return output
 
 
 class Output:
-    def __init__(self, ref_job):
+    def __init__(self, ref_job, all_output):
         self._job = ref_job
+        self._all_output = all_output
+        self._hessian = None
+        self._dx = None
+        self._dm = None
 
     @property
     def all_energy(self):
-        output = self._job.qn_output
-        if output is None: return None
-        return output['energy']
+        if self._all_output is None: return None
+        return self._all_output['energy']
 
     @property
     def energy(self):
-        all_energy = self.all_energy
-        if all_energy is None: return None
-        return np.mean(all_energy, axis=-1)
+        if self._all_output is None: return None
+        return np.mean(self._all_output, axis=-1)
 
     @property
     def all_forces(self):
-        output = self._job.qn_output
-        if output is None: return None
-        return output['forces']
+        if self._all_output is None: return None
+        return self._all_output['forces']
 
     @property
     def e_diff(self):
-        output = self._job.qn_output
-        if output is None: return None
-        return output['ediff']
+        if self._all_output is None: return None
+        return self._all_output['ediff']
 
     @property
     def forces(self):
-        all_forces = self.all_forces
-        if all_forces is None: return None
+        if self._all_output is None: return None
         return np.array([
             self._job.symmetry.symmetrize_vectors(f.mean(axis=0))
-            for f in all_forces
+            for f in self._all_output
         ])
+
+    @property
+    def nu(self):
+        if self._all_output is None: return None
+        return self._all_output['nu']
+
+    @property
+    def magmoms(self):
+        if self._all_output is None: return None
+        return self._all_output['magmoms']
+
+    @property
+    def hessian(self):
+        if self._all_output is None: return None
+        if self._hessian is None:
+            self._hessian = self.update_hessian(
+                self._job.structure,
+                self._job.initial_hessian,
+                self._all_output['nu'],
+                self._all_output['magmoms'],
+                self._all_output['positions'][:, 0],
+                self._all_output['forces'],
+                self._job.symmetry
+            )
+        return self._hessian
+
+    @property
+    def dx(self):
+        if self._all_output is None: return None
+        if self._dx is None:
+            self._dx, self._dm = self._get_dx(
+                self.hessian,
+                self._all_output.forces[-1],
+                self._all_output.nu[-1],
+                self._job.symmetry,
+                self._all_output.magmoms[-1]
+            )
+        return self._dx
+
+    @property
+    def dm(self):
+        if self._all_output is None: return None
+        if self._dm is None:
+            _ = self.dx
+        return self._dm
