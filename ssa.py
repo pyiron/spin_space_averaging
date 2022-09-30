@@ -486,8 +486,7 @@ class SSA:
         nu_sym = self.symmetrize_magmoms(self.symmetry, nu, m)
         return np.absolute(nu_sym).max() < self.input.convergence.magnon_force
 
-    def _run_next(self, job_lst):
-        output = self.get_output(job_lst, (-1, len(self.sqs)))
+    def _run_next(self, job_lst, output):
         if self._check_convergence(
             output['forces'][-1], output['nu'][-1], output['magmoms'][-1]
         ):
@@ -574,12 +573,13 @@ class SSA:
         return job_lst
 
     @property
-    def qn_job_lst(self):
+    def qn_output(self):
         job_lst = self._qn_job_lst
         if job_lst is None:
             return None
-        self._run_next(job_lst)
-        return [self.get_job(job) for job in job_lst]
+        output = self.get_output(job_lst, (-1, len(self.sqs)))
+        self._run_next(job_lst, output)
+        return output
 
 
 class Output:
@@ -588,31 +588,31 @@ class Output:
 
     @property
     def all_energy(self):
-        if self._job.qn_job_lst is None:
+        output = self._job.qn_output
+        if output is None:
             return None
-        return np.reshape([
-            job.output.energy_pot for job in self._job.qn_job_lst
-        ], (-1, self._job.input.n_copy))
+        return output['energy']
 
     @property
     def energy(self):
-        if self._job.qn_job_lst is None:
+        all_energy = self.all_energy
+        if all_energy is None:
             return None
-        return np.mean(self.all_energy, axis=-1)
+        return np.mean(all_energy, axis=-1)
 
     @property
     def all_forces(self):
-        if self._job.qn_job_lst is None:
+        output = self._job.qn_output
+        if output is None:
             return None
-        return np.reshape([
-            job.output.forces for job in self._job.qn_job_lst
-        ], (-1, self._job.input.n_copy, len(self._job.structure), 3))
+        return output['forces']
 
     @property
     def forces(self):
-        if self._job.qn_job_lst is None:
+        all_forces = self.all_forces
+        if all_forces is None:
             return None
         return np.array([
             self._job.symmetry.symmetrize_vectors(f.mean(axis=0))
-            for f in self.all_forces
+            for f in all_forces
         ])
