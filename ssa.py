@@ -331,6 +331,7 @@ class SSA:
                 self.symmetrize_magmoms(self.symmetry, output['magmoms']),
                 self.symmetry,
             )
+            assert np.all(self.input.init_hessian['magnon'] > 0)
             self.sync()
         return self.input.init_hessian['magnon']
 
@@ -398,6 +399,7 @@ class SSA:
 
     def get_output(self, job_list, shape=None):
         output = defaultdict(list)
+        assert shape is None or isinstance(shape, tuple)
         for job_name in job_list:
             job = self.get_job(job_name)
             output['energy'].append(job.output.energy_pot[-1])
@@ -408,10 +410,12 @@ class SSA:
             output['magmoms'].append(job['output/generic/dft/atom_spins'][-1])
             output['forces'].append(job['output/generic/forces'][-1])
             output['positions'].append(job['output/generic/positions'][-1])
+            output['residue'].append(job['output/generic/dft/residue'][-1])
         if shape is not None:
             output['energy'] = np.reshape(output['energy'], shape)
             shape = output['energy'].shape
             output['ediff'] = np.reshape(output['ediff'], shape)
+            output['residue'] = np.reshape(output['residue'], shape + (2,))
             output['magmoms'] = np.reshape(output['magmoms'], shape + (-1,))
             output['nu'] = np.reshape(output['nu'], shape + (-1,))
             output['forces'] = np.reshape(output['forces'], shape + (-1, 3,))
@@ -522,11 +526,9 @@ class SSA:
                     0,
                     ii,
                 )
-            if self.get_job(new_job_name) is not None:
-                continue
+            if self.get_job(new_job_name) is not None: continue
             spx = self.project.create.job.Sphinx(new_job_name)
-            if not spx.status.initialized:
-                continue
+            if not spx.status.initialized: continue
             spx.structure = spx_old.structure.copy()
             spx.structure.positions += dx
             m = spx_old.structure.get_initial_magnetic_moments()
@@ -544,8 +546,7 @@ class SSA:
                 )
         else:
             magmom_jobs = self.init_magmom_jobs
-            if magmom_jobs is None:
-                return None
+            if magmom_jobs is None: return None
             m = self.input.init_hessian.magnetic_moments
             output = self.get_output(magmom_jobs, (-1, len(m)))
             i = np.argmin(output['energy'].mean(axis=0))
@@ -561,22 +562,18 @@ class SSA:
                     i,
                     j,
                 ))
-                if job_tmp is None:
-                    break
-                if job_tmp.status not in ['finished', 'not_converged']:
-                    break
+                if job_tmp is None: break
+                if job_tmp.status not in ['finished', 'not_converged']: break
                 job_lst_tmp.append(job_tmp.job_name)
             if len(job_lst_tmp) == len(self.sqs):
                 job_lst.extend(job_lst_tmp)
-            else:
-                break
+            else: break
         return job_lst
 
     @property
     def qn_output(self):
         job_lst = self._qn_job_lst
-        if job_lst is None:
-            return None
+        if job_lst is None: return None
         output = self.get_output(job_lst, (-1, len(self.sqs)))
         self._run_next(job_lst, output)
         return output
@@ -589,29 +586,31 @@ class Output:
     @property
     def all_energy(self):
         output = self._job.qn_output
-        if output is None:
-            return None
+        if output is None: return None
         return output['energy']
 
     @property
     def energy(self):
         all_energy = self.all_energy
-        if all_energy is None:
-            return None
+        if all_energy is None: return None
         return np.mean(all_energy, axis=-1)
 
     @property
     def all_forces(self):
         output = self._job.qn_output
-        if output is None:
-            return None
+        if output is None: return None
         return output['forces']
+
+    @property
+    def e_diff(self):
+        output = self._job.qn_output
+        if output is None: return None
+        return output['ediff']
 
     @property
     def forces(self):
         all_forces = self.all_forces
-        if all_forces is None:
-            return None
+        if all_forces is None: return None
         return np.array([
             self._job.symmetry.symmetrize_vectors(f.mean(axis=0))
             for f in all_forces
