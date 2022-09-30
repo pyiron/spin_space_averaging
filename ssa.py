@@ -388,7 +388,10 @@ class SSA:
             jt = self.project.job_table().job
             if job_name not in list(jt.job):
                 return
-            if job_name in list(jt[jt.status='submitted'].job) + list(jt[jt.status='running'].job):
+            if job_name in (
+                list(jt[jt.status=='submitted'].job)
+                + list(jt[jt.status=='running'].job)
+            ):
                 return
             self._all_jobs[job_name] = self.project.load(job_name)
             return self._all_jobs[job_name]
