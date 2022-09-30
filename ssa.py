@@ -286,8 +286,7 @@ class SSA:
                     get_asym_sum(self.sqs.flatten()),
                     j,
                 )
-                spx = self.get_job(job_name)
-                if spx is None:
+                if self.get_job(job_name) is None:
                     spx = self.project.create.job.Sphinx(job_name)
                     spx.structure = self.lammps.structure.copy()
                     spx.structure.set_initial_magnetic_moments(magnitude * magmoms)
@@ -386,10 +385,11 @@ class SSA:
         if job_name not in list(self._all_jobs.keys()):
             if job_name not in list(self.project.job_table().job):
                 return
-            job = self.project.load(job_name)
-            if job.status.running:
+            if job_name in list(self.project.job_table(status='submitted').job):
                 return
-            self._all_jobs[job_name] = job
+            if job_name in list(self.project.job_table(status='running').job):
+                return
+            self._all_jobs[job_name] = self.project.load(job_name)
         return self._all_jobs[job_name]
 
     def get_output(self, job_list, shape=None):
@@ -398,12 +398,12 @@ class SSA:
             job = self.get_job(job_name)
             output['energy'].append(job.output.energy_pot[-1])
             output['ediff'].append(
-                np.diff(job['output/generic/dft/scf_energy_free'][0])[-1]
+                np.diff(job['output/generic/dft/scf_energy_free'][-1])[-1]
             )
-            output['nu'].append(job['output/generic/dft/magnetic_forces'][0])
-            output['magmoms'].append(job['output/generic/dft/atom_spins'][0])
-            output['forces'].append(job['output/generic/forces'][0])
-            output['positions'].append(job['output/generic/positions'][0])
+            output['nu'].append(job['output/generic/dft/magnetic_forces'][-1])
+            output['magmoms'].append(job['output/generic/dft/atom_spins'][-1])
+            output['forces'].append(job['output/generic/forces'][-1])
+            output['positions'].append(job['output/generic/positions'][-1])
         if shape is not None:
             output['energy'] = np.reshape(output['energy'], shape)
             shape = output['energy'].shape
@@ -519,6 +519,8 @@ class SSA:
                     0,
                     ii,
                 )
+            if self.get_job(new_job_name) is not None:
+                continue
             spx = self.project.create.job.Sphinx(new_job_name)
             if not spx.status.initialized:
                 continue
