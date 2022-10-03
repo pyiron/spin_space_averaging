@@ -21,6 +21,17 @@ def get_bfgs(s, y, H):
     return dH
 
 
+def get_psb(s, y, H):
+    H_tmp = y - np.einsum("...ij,...j->...i", H, x)
+    inv_ss = 1 / np.einsum("...i,...i->...", s, s)
+    dH = np.einsum("...i,...j,...->...ij", H_tmp, s, inv_ss, optimize=True)
+    dH += dH.T
+    return (
+        dH
+        - np.einsum("...i,...i,...j,...k,...->...jk", s, H_tmp, s, s, inv_ss**2, optimize=True)
+    )
+
+
 def get_asym_sum(args):
     return np.sum([
         np.sin(ii + 2) * arg for ii, arg in enumerate(args)
@@ -121,10 +132,16 @@ class SSA:
             self.project.data.read()
         except KeyError:
             self.input.n_copy = 8
+            self.input.is_diffusion = False
             self.input.nonmag_atoms = None
             self.input.create_group('lammps')
             self.input.lammps.potential = None
             self.input.lammps.use_lammps = True
+            self.input.lammps.mode = 'PSB'
+            self.input.lammps.ionic_steps = 10000
+            self.input.lammps.ionic_force_tolerance = 1.0e-4
+            self.input.lampms.starting_h = 10
+            self.input.lampms.max_displacement = 0.1
             self.input.create_group('symmetry')
             self.input.symmetry.symprec = 1e-05
             self.input.create_group('sqs')
@@ -184,7 +201,7 @@ class SSA:
         try: # backward compatibility
             if not self.input.lammps.use_lammps:
                 return self.structure
-        except:
+        except KeyError:
             pass
         return self.lammps.structure
 
@@ -471,8 +488,18 @@ class SSA:
         dUdx = np.append(-f_sym, nu, axis=1)
         new_hessian = [hessian.copy()]
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
-            new_hessian.append(get_bfgs(xx, ff, new_hessian[-1]))
+            if self.is_diffusion:
+                new_hessian.append(get_psb(xx, ff, new_hessian[-1]))
+            else:
+                new_hessian.append(get_bfgs(xx, ff, new_hessian[-1]))
         return np.asarray(new_hessian)
+
+    @property
+    def is_diffusion(self):
+        try:
+            return self.input.is_diffusion
+        except KeyError:
+            return False
 
     def _get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
