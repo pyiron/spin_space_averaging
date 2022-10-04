@@ -85,7 +85,7 @@ class Lammps:
         structure,
         potential=None,
         pressure=None,
-        bulk_modulus=1e4,
+        bulk_modulus=1e3,
         min_change=1.0e-4,
         pressure_tolerance=1.0e-2
     ):
@@ -93,26 +93,23 @@ class Lammps:
         if pressure is not None:
             job_name = ('lmp_relax', struct_to_tag(structure), *pressure)
         job = self.project.create.job.Lammps(job_name)
-        job.structure = structure
+        job.structure = structure.copy()
         if potential is not None:
             job.potential = potential
         if job.status.initialized:
             with job.interactive_open() as lmp:
                 qn = run_qn(lmp)
                 if pressure is not None:
-                    H = bulk_modulus / lmp.structure.cell.diagonal()
-                    p_lst = [lmp.output.pressures[-1].diagonal()]
-                    L_lst = [lmp.structure.cell.diagonal()]
+                    H = lmp.structure.get_volume()**(1 / 3) / np.ones((3, 3)) / bulk_modulus
                     for _ in range(100):
-                        lmp.structure.cell.set_cell(
-                            L_lst[-1] + p_lst[-1] / H, scale_atoms=True
+                        lmp.structure.set_cell(
+                            lmp.structure.cell + lmp.output.pressures[-1] * H, scale_atoms=True
                         )
                         qn = run_qn(lmp, starting_h=qn.hessian)
-                        p_lst.append(lmp.output.pressures[-1].diagonal())
-                        L_lst.append(lmp.structure.cell.diagonal())
-                        dL = np.diff(L_lst, axis=0)[-1]
-                        H_tmp = -np.diff(p_lst, axis=0)[-1] - H * dL
-                        H += H_tmp / dL * (1 - np.exp(-0.5 * dL**2 / min_change**2))
+                        dp = np.prod(lmp.output.pressures[-2:], axis=0)
+                        H[dp < -pressure_tolerance**2] *= 0.5
+                        H[dp > pressure_tolerance**2] *= 1.2
+
                         if np.absolute(
                             lmp.output.pressures[-1].diagonal() - pressure
                         ).max() < pressure_tolerance:
@@ -517,7 +514,7 @@ class SSA:
                 magnetic_forces = self.symmetrize_magmoms(
                     symmetry, magnetic_forces, magmoms
                 )
-            forces = symmetry.symmetrize_vectors(forces.mean(axis=0))
+            forces = np.array([symmetry.symmetrize_vectors(f.mean(axis=0)) for f in forces])
         dx, dm = [], []
         for h, f, m in zip(hessian, forces, magnetic_forces):
             xm_new = np.einsum('ij,j->i', np.linalg.inv(h), np.append(-f, m))
@@ -657,7 +654,7 @@ class Output:
     def hessian(self):
         if self._all_output is None: return None
         if self._hessian is None:
-            self._hessian = self.update_hessian(
+            self._hessian = self._job.update_hessian(
                 self._job.structure,
                 self._job.initial_hessian,
                 self._all_output['nu'],
@@ -672,12 +669,12 @@ class Output:
     def dx(self):
         if self._all_output is None: return None
         if self._dx is None:
-            self._dx, self._dm = self._get_dx(
+            self._dx, self._dm = self._job._get_dx(
                 self.hessian,
-                self._all_output.forces[-1],
-                self._all_output.nu[-1],
+                self._all_output.forces,
+                self._all_output.nu,
                 self._job.symmetry,
-                self._all_output.magmoms[-1]
+                self._all_output.magmoms
             )
         return self._dx
 
