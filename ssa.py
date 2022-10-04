@@ -3,6 +3,7 @@ from collections import defaultdict
 from spin_space_averaging.sqs import SQS
 from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
 from pyiron_base.jobs.job.util import _get_safe_job_name
+from pyiron_atomistics.interactive.quasi_newton import run_qn
 
 
 def get_bfgs(s, y, H):
@@ -22,7 +23,7 @@ def get_bfgs(s, y, H):
 
 
 def get_psb(s, y, H):
-    H_tmp = y - np.einsum("...ij,...j->...i", H, x)
+    H_tmp = y - np.einsum("...ij,...j->...i", H, s)
     inv_ss = 1 / np.einsum("...i,...i->...", s, s)
     dH = np.einsum("...i,...j,...->...ij", H_tmp, s, inv_ss, optimize=True)
     dH += dH.T
@@ -80,7 +81,13 @@ class Lammps:
         return qha['output/force_constants'][0]
 
     def _get_minimize(
-        self, structure, potential=None, pressure=None, bulk_modulus=1e4, min_change=1.0e-4
+        self,
+        structure,
+        potential=None,
+        pressure=None,
+        bulk_modulus=1e4,
+        min_change=1.0e-4,
+        pressure_tolerance=1.0e-2
     ):
         job_name = ('lmp_relax', struct_to_tag(structure), pressure)
         if pressure is not None:
@@ -201,7 +208,7 @@ class SSA:
 
     @property
     def _relaxed_structure(self):
-        try: # backward compatibility
+        try:  # backward compatibility
             if not self.input.lammps.use_lammps:
                 return self.structure
         except KeyError:
