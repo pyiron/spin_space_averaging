@@ -80,34 +80,37 @@ class Lammps:
         return qha['output/force_constants'][0]
 
     def _get_minimize(
-        self, structure, potential=None, symmetry=None, pressure=None
+        self, structure, potential=None, pressure=None, bulk_modulus=1e4, min_change=1.0e-4
     ):
         job_name = ('lmp_relax', struct_to_tag(structure), pressure)
         if pressure is not None:
             job_name = ('lmp_relax', struct_to_tag(structure), *pressure)
         job = self.project.create.job.Lammps(job_name)
-        if symmetry is None:
-            symmetry = structure.get_symmetry()
         job.structure = structure
         if potential is not None:
             job.potential = potential
-        job.calc_minimize(pressure=pressure)
         if job.status.initialized:
-            job.run()
-        final_structure = job.get_structure()
-        dx = final_structure.get_scaled_positions() - structure.get_scaled_positions()
-        dx -= np.rint(dx)
-        dx = np.einsum('ji,nj->ni', final_structure.cell, dx)
-        structure = structure.apply_strain(
-            np.einsum(
-                'ij,jk->ik',
-                final_structure.cell,
-                np.linalg.inv(structure.cell)
-            ) - np.eye(3),
-            return_box=True
-        )
-        structure.positions += symmetry.symmetrize_vectors(dx)
-        return structure.center_coordinates_in_unit_cell()
+            with job.interactive_open() as lmp:
+                qn = run_qn(lmp)
+                if pressure is not None:
+                    H = bulk_modulus / lmp.structure.cell.diagonal()
+                    p_lst = [lmp.output.pressures[-1].diagonal()]
+                    L_lst = [lmp.structure.cell.diagonal()]
+                    for _ in range(100):
+                        lmp.structure.cell.set_cell(
+                            L_lst[-1] + p_lst[-1] / H, scale_atoms=True
+                        )
+                        qn = run_qn(lmp, starting_h=qn.hessian)
+                        p_lst.append(lmp.output.pressures[-1].diagonal())
+                        L_lst.append(lmp.structure.cell.diagonal())
+                        dL = np.diff(L_lst, axis=0)[-1]
+                        H_tmp = -np.diff(p_lst, axis=0)[-1] - H * dL
+                        H += H_tmp / dL * (1 - np.exp(-0.5 * dL**2 / min_change**2))
+                        if np.absolute(
+                            lmp.output.pressures[-1].diagonal() - pressure
+                        ).max() < pressure_tolerance:
+                            break
+        return job.get_structure()
 
     @property
     def structure(self):
@@ -115,7 +118,6 @@ class Lammps:
             self._structure = self._get_minimize(
                 self._ref_job.structure,
                 self._ref_job.input.lammps['potential'],
-                self._ref_job.symmetry,
                 None
             )
         return self._structure
@@ -140,8 +142,9 @@ class SSA:
             self.input.lammps.mode = 'PSB'
             self.input.lammps.ionic_steps = 10000
             self.input.lammps.ionic_force_tolerance = 1.0e-4
-            self.input.lampms.starting_h = 10
-            self.input.lampms.max_displacement = 0.1
+            self.input.lammps.starting_h = 10
+            self.input.lammps.max_displacement = 0.1
+            self.input.lammps.bulk_modulus = 1e4
             self.input.create_group('symmetry')
             self.input.symmetry.symprec = 1e-05
             self.input.create_group('sqs')
