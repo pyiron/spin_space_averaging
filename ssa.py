@@ -620,7 +620,7 @@ class Output:
     @property
     def energy(self):
         if self._all_output is None: return None
-        return np.mean(self._all_output, axis=-1)
+        return np.mean(self.all_energy, axis=-1)
 
     @property
     def all_forces(self):
@@ -637,7 +637,7 @@ class Output:
         if self._all_output is None: return None
         return np.array([
             self._job.symmetry.symmetrize_vectors(f.mean(axis=0))
-            for f in self._all_output
+            for f in self.all_forces
         ])
 
     @property
