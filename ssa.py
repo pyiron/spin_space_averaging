@@ -481,7 +481,7 @@ class SSA:
         symmetry=None
     ):
         if len(magmoms) == 1:
-            return hessian
+            return np.array([hessian])
         if symmetry is None:
             symmetry = structure.get_symmetry()
         nu = self.symmetrize_magmoms(symmetry, magnetic_forces, magmoms)
@@ -489,6 +489,7 @@ class SSA:
         f_sym = symmetry.symmetrize_vectors(
             forces.mean(axis=1)
         ).reshape(-1, 3 * len(structure))
+        # assert np.shape(positions) == f_sym.shape
         x_diff = np.diff(positions, axis=0)
         x_diff = structure.find_mic(x_diff).reshape(-1, 3 * len(structure))
         x_diff = np.append(x_diff, np.diff(magmoms, axis=0), axis=1)
@@ -511,10 +512,13 @@ class SSA:
     def _get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
         if symmetry is not None:
             if magmoms is not None:
-                magnetic_forces = self.symmetrize_magmoms(
-                    symmetry, magnetic_forces, magmoms
-                )
+                magnetic_forces = np.array([
+                    self.symmetrize_magmoms(symmetry, nu, m)
+                    for nu, m in zip(magnetic_forces, magmoms)
+                ])
             forces = np.array([symmetry.symmetrize_vectors(f.mean(axis=0)) for f in forces])
+        # assert len(hessian) == len(forces) == len(magnetic_forces)
+        # assert np.ptp(np.shape(hessian)[-2:]) == 0
         dx, dm = [], []
         for h, f, m in zip(hessian, forces, magnetic_forces):
             xm_new = np.einsum('ij,j->i', np.linalg.inv(h), np.append(-f, m))
@@ -533,7 +537,7 @@ class SSA:
 
     def _run_next(self, job_lst, output):
         if self._check_convergence(
-            output.forces[-1], output.nu[-1], output.magmoms[-1]
+            output.all_forces[-1], output.nu[-1], output.magmoms[-1]
         ):
             return
         for ii, job_name in enumerate(job_lst[-len(self.sqs):]):
@@ -671,10 +675,10 @@ class Output:
         if self._dx is None:
             self._dx, self._dm = self._job._get_dx(
                 self.hessian,
-                self._all_output.forces,
-                self._all_output.nu,
+                self.all_forces,
+                self._all_output['nu'],
                 self._job.symmetry,
-                self._all_output.magmoms
+                self._all_output['magmoms']
             )
         return self._dx
 
