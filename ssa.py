@@ -198,7 +198,7 @@ class SSA:
             self.input.sqs.n_steps = 10000
             self.input.sqs.snapshots = None
             self.input.create_group('init_hessian')
-            # Initial total Hessian not defined!!
+            self.input.init_hessian.total_hessian = None
             self.input.init_hessian.phonon = None
             self.input.init_hessian.magnon = None
             self.input.init_hessian.magnetic_moments = None
@@ -346,7 +346,7 @@ class SSA:
             raise ValueError(
                 'job.input.init_hessian.magnetic_moments not defined'
             )
-        if len(self.input.init_hessian.magnetic_moments) <= 1:
+        if len(self.input.init_hessian.magnetic_moments) == 1:
             raise ValueError(
                 'There must be at least two magnetic moment values'
             )
@@ -386,7 +386,7 @@ class SSA:
 
     @property
     def initial_hessian_magnon(self):
-        if self.input.init_hessian['magnon'] is None:
+        if self.input.init_hessian.magnon is None:
             if self.input.init_hessian.magnetic_moments is None:
                 raise ValueError(
                     'job.input.init_hessian.magnetic_moments not defined'
@@ -400,7 +400,7 @@ class SSA:
                     len(self.sqs)
                 )
             )
-            self.input.init_hessian['magnon'] = self.get_initial_hessian_magnon(
+            self.input.init_hessian.magnon = self.get_initial_hessian_magnon(
                 self.symmetrize_magmoms(
                     self.symmetry, output['nu'], output['magmoms']
                 ),
@@ -415,10 +415,15 @@ class SSA:
     @property
     def initial_hessian(self):
         if self._initial_hessian is None:
-            self._initial_hessian = self.get_initial_hessian(
-                H_phonon=self.initial_hessian_phonon,
-                H_magnon=self.initial_hessian_magnon
-            )
+            try:
+                self._initial_hessian = self.input.init_hessian.total_hessian
+            except KeyError:
+                pass
+            if self._initial_hessian is None:
+                self._initial_hessian = self.get_initial_hessian(
+                    H_phonon=self.initial_hessian_phonon,
+                    H_magnon=self.initial_hessian_magnon
+                )
         return self._initial_hessian.copy()
 
     def get_initial_hessian(self, H_phonon, H_magnon):
