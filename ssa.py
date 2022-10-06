@@ -128,6 +128,37 @@ class Lammps:
 
 
 class SSA:
+    """
+    Spin-space-averaging workflow - this allows for a paramagnetic structure
+    optimization using multiple SQS snapshots.
+
+    This workflow contains the following steps:
+
+    1. Structure pre-optimization using LAMMPS
+    2. Computation of SQS
+    3. Estimation of the diagonal Hessian matrix for the magnetic moments
+    4. Estimation of the Hessian matrix for the positions using LAMMPS
+    5. Launch calculations according to the Quasi Newton algorithm
+
+    Detailed explanation and customization possibilities for each step:
+
+    1.
+    - The pre-optimization can be switched off by setting
+        `job.input.lammps.use_lammps = False`
+    - The interatomic potential can be provided via
+        `job.input.lammps.potential`, but otherwise the workflow tries to find
+        a random potential
+    2.
+    - The number of snapshots for SQS (and the following simulations) is given
+        in `job.input.n_copy`. Default is 8
+    - SQS takes only pairwise distribution into account, but the statistics to
+        approximate the infinite medium is performed using all `n_copy`
+        snapshots. Furthermore, the algorithm relies on the smeared histogram,
+        so the smearing width (given in `job.input.sqs.sigma`) should be small
+        enough to distinguish different shells, but not too small if the system
+        contains structural defects (such as vacancy or grain boundary) in
+        order to give good statistics.
+    """
     def __init__(self, project, name):
         self._project = project.create_group(name)
         self.lammps = Lammps(self)
