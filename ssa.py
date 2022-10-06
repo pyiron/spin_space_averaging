@@ -528,9 +528,9 @@ class SSA:
         new_hessian = [hessian.copy()]
         for xx, ff in zip(x_diff, np.diff(dUdx, axis=0)):
             if self.is_diffusion:
-                new_hessian.append(get_psb(xx, ff, new_hessian[-1]))
+                new_hessian.append(new_hessian[-1] + get_psb(xx, ff, new_hessian[-1]))
             else:
-                new_hessian.append(get_bfgs(xx, ff, new_hessian[-1]))
+                new_hessian.append(new_hessian[-1] + get_bfgs(xx, ff, new_hessian[-1]))
         return np.asarray(new_hessian)
 
     @property
