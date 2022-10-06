@@ -158,6 +158,13 @@ class SSA:
         enough to distinguish different shells, but not too small if the system
         contains structural defects (such as vacancy or grain boundary) in
         order to give good statistics.
+    - The indices of the non-magnetic atoms (such as C or H) must be stored in
+        `job.input.nonmag_atoms``
+    3.
+    - In order to initialize the Hessian matrix for the magnetic interactions,
+        set either the sample magnetic moments in
+        `job,input.init_hessian.magnetic_moments` or set the Hessian matrix
+        directly in `self.input.init_hessian.magnon`.
     """
     def __init__(self, project, name):
         self._project = project.create_group(name)
@@ -191,6 +198,7 @@ class SSA:
             self.input.sqs.n_steps = 10000
             self.input.sqs.snapshots = None
             self.input.create_group('init_hessian')
+            # Initial total Hessian not defined!!
             self.input.init_hessian.phonon = None
             self.input.init_hessian.magnon = None
             self.input.init_hessian.magnetic_moments = None
@@ -337,6 +345,10 @@ class SSA:
         if self.input.init_hessian.magnetic_moments is None:
             raise ValueError(
                 'job.input.init_hessian.magnetic_moments not defined'
+            )
+        if len(self.input.init_hessian.magnetic_moments) <= 1:
+            raise ValueError(
+                'There must be at least two magnetic moment values'
             )
         is_running = False
         job_lst = []
@@ -719,3 +731,12 @@ class Output:
         if self._dm is None:
             _ = self.dx
         return self._dm
+
+    @property
+    def dE(self):
+        if self._all_output is None: return None
+        E_lst = []
+        for dx, dm, h in zip(self.dx, self.dm, self.hessian):
+            dx = np.append(dx.flatten(), dm)
+            E_lst.append(h.dot(dx).dot(dx))
+        return np.array(E_lst)
