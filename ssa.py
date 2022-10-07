@@ -1,9 +1,12 @@
 import numpy as np
 from collections import defaultdict
 from spin_space_averaging.sqs import SQS
-from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation
+from pyiron_contrib.atomistics.atomistics.master.qha import QuasiHarmonicApproximation,\
+        get_vibrational_frequencies,\
+        get_helmholtz_free_energy
 from pyiron_base.jobs.job.util import _get_safe_job_name
 from pyiron_atomistics.interactive.quasi_newton import run_qn
+from pint import UnitRegistry
 
 
 def get_bfgs(s, y, H):
@@ -68,6 +71,7 @@ class Lammps:
         lmp.structure = self._get_minimize(
             structure, potential=potential, pressure=np.zeros(3)
         )
+        lmp.structure.positions += 1.0e-4 - lmp.structure.positions.min(axis=0)
         if potential is not None:
             lmp.potential = potential
         lmp.interactive_open()
@@ -247,7 +251,7 @@ class SSA:
         try:  # backward compatibility
             if not self.input.lammps.use_lammps:
                 return self.structure
-        except KeyError:
+        except AttributeError:
             pass
         return self.lammps.structure
 
@@ -417,7 +421,7 @@ class SSA:
         if self._initial_hessian is None:
             try:
                 self._initial_hessian = self.input.init_hessian.total_hessian
-            except KeyError:
+            except AttributeError:
                 pass
             if self._initial_hessian is None:
                 self._initial_hessian = self.get_initial_hessian(
@@ -554,7 +558,7 @@ class SSA:
     def is_diffusion(self):
         try:
             return self.input.is_diffusion
-        except KeyError:
+        except AttributeError:
             return False
 
     def _get_dx(self, hessian, forces, magnetic_forces, symmetry=None, magmoms=None):
@@ -663,6 +667,9 @@ class Output:
         self._hessian = None
         self._dx = None
         self._dm = None
+        self._eigenvalues = None
+        self._eigenvectors = None
+        self._nu = None
 
     @property
     def all_energy(self):
@@ -738,10 +745,51 @@ class Output:
         return self._dm
 
     @property
-    def dE(self):
+    def dE_estimate(self):
         if self._all_output is None: return None
         E_lst = []
         for dx, dm, h in zip(self.dx, self.dm, self.hessian):
             dx = np.append(dx.flatten(), dm)
             E_lst.append(h.dot(dx).dot(dx))
-        return np.array(E_lst)
+        return -np.array(E_lst) / 2
+
+    @property
+    def eigenvalues(self):
+        if self._all_output is None: return None
+        if self._eigenvalues is None:
+            self._eigenvalues, self._eigenvectors = np.linalg.eigh(
+                self.hessian
+            )
+        return self._eigenvalues
+
+    @property
+    def eigenvectors(self):
+        if self._all_output is None: return None
+        if self._eigenvectors is None:
+            _ = self.eigenvalues
+        return self._eigenvectors
+
+    @property
+    def vibrational_frequencies(self):
+        if self._nu is None:
+            l = 3 * len(self._job.structure)
+            self._nu = np.array([
+                get_vibrational_frequencies(self._job.structure, h)
+                for h in self.hessian[:, :l, :l]
+            ])
+        return self._nu
+
+    def get_helmholtz_free_energy(self, temperature):
+        return np.array([
+            get_helmholtz_free_energy(nu, temperature)
+            for nu in self.vibrational_frequencies
+        ])
+
+    @property
+    def std_energy(self):
+        return np.std(self.all_energy, axis=1, ddof=1)
+
+    @property
+    def std_forces(self):
+        f = self._job.symmetry.symmetrize_vectors(self.all_forces)
+        return np.std(f, axis=1, ddof=1)
