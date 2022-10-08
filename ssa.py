@@ -627,9 +627,9 @@ class SSA:
             magmom_jobs = self.init_magmom_jobs
             if magmom_jobs is None: return None
             m = self.input.init_hessian.magnetic_moments
-            output = self.get_job_output(magmom_jobs, (-1, len(m)))
-            i = np.argmin(output['energy'].mean(axis=0))
-            job_lst = magmom_jobs[i * len(m):i * len(m) + len(self.sqs)]
+            output = self.get_job_output(magmom_jobs, (-1, len(self.sqs)))
+            i = np.argmin(output['energy'].mean(axis=-1))
+            job_lst = magmom_jobs[i * len(self.sqs):(i + 1) * len(self.sqs)]
         for i in range(self.input.convergence.max_steps):
             job_lst_tmp = []
             for j, magmoms in enumerate(self.sqs):
