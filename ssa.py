@@ -350,10 +350,6 @@ class SSA:
             raise ValueError(
                 'job.input.init_hessian.magnetic_moments not defined'
             )
-        if len(self.input.init_hessian.magnetic_moments) == 1:
-            raise ValueError(
-                'There must be at least two magnetic moment values'
-            )
         is_running = False
         job_lst = []
         for magnitude in np.atleast_1d(self.input.init_hessian.magnetic_moments):
@@ -362,7 +358,7 @@ class SSA:
                     'spx',
                     self._structure_job_name,
                     self._dft_job_name,
-                    magnitude,
+                    np.sum(magnitude),
                     get_asym_sum(self.sqs.flatten()),
                     j,
                 )
@@ -395,6 +391,8 @@ class SSA:
                 raise ValueError(
                     'job.input.init_hessian.magnetic_moments not defined'
                 )
+            if len(self.input.init_hessian.magnetic_moments) < 2:
+                raise ValueError('You need at least 2 magnetic moments')
             job_lst = self.init_magmom_jobs
             if job_lst is None:
                 return
