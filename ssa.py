@@ -358,7 +358,7 @@ class SSA:
                     'spx',
                     self._structure_job_name,
                     self._dft_job_name,
-                    np.sum(magnitude),
+                    np.round(np.sum(magnitude), decimals=3),
                     get_asym_sum(self.sqs.flatten()),
                     j,
                 )
@@ -596,7 +596,7 @@ class SSA:
             try:
                 new_job_name[-2] = str(int(new_job_name[-2]) + 1)
                 new_job_name = '_'.join(new_job_name)
-            except:
+            except ValueError:
                 new_job_name = (
                     'spx',
                     self._structure_job_name,
@@ -769,6 +769,7 @@ class Output:
 
     @property
     def vibrational_frequencies(self):
+        if self._all_output is None: return None
         if self._nu is None:
             l = 3 * len(self._job.structure)
             self._nu = np.array([
@@ -778,6 +779,7 @@ class Output:
         return self._nu
 
     def get_helmholtz_free_energy(self, temperature):
+        if self._all_output is None: return None
         return np.array([
             get_helmholtz_free_energy(nu, temperature)
             for nu in self.vibrational_frequencies
@@ -785,9 +787,33 @@ class Output:
 
     @property
     def std_energy(self):
+        if self._all_output is None: return None
         return np.std(self.all_energy, axis=1, ddof=1)
 
     @property
     def std_forces(self):
+        if self._all_output is None: return None
         f = self._job.symmetry.symmetrize_vectors(self.all_forces)
         return np.std(f, axis=1, ddof=1)
+
+    @property
+    def positions(self):
+        if self._all_output is None: return None
+        return self._all_output['positions'][:, 0]
+
+    def get_structure(self, frame=-1, wrap_atoms=True, estimated=True):
+        structure = self._job.structure.copy()
+        m = np.absolute(self.magmoms[frame, 0])
+        structure.hessian_matrix = self.hessian[frame]
+        structure.positions = self.positions[frame]
+        if wrap_atoms:
+            structure.center_coordinates_in_unit_cell()
+        if not estimated:
+            structure.set_initial_magnetic_moments(m)
+            return structure
+        structure.positions += self.dx[frame]
+        if wrap_atoms:
+            structure.center_coordinates_in_unit_cell()
+        m += self.dm[frame]
+        structure.set_initial_magnetic_moments(m)
+        return structure
