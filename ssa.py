@@ -167,7 +167,7 @@ class SSA:
     3.
     - In order to initialize the Hessian matrix for the magnetic interactions,
         set either the sample magnetic moments in
-        `job,input.init_hessian.magnetic_moments` or set the Hessian matrix
+        `job.input.init_hessian.magnetic_moments` or set the Hessian matrix
         directly in `self.input.init_hessian.magnon`.
     """
     def __init__(self, project, name):
