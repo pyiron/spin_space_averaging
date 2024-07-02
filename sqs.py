@@ -2,6 +2,7 @@ import numpy as np
 from tqdm.auto import tqdm
 from pyiron_atomistics.atomistics.job.atomistic import AtomisticGenericJob
 from pyiron_base import DataContainer
+from functools import cached_property
 
 
 class SQSInteractive:
@@ -43,13 +44,11 @@ class SQSInteractive:
         self._spins = None
         self._n_copy = value
 
-    @property
+    @cached_property
     def neigh(self):
-        if self._neigh is None:
-            self._neigh = self.structure.get_neighbors(
-                num_neighbors=None, cutoff_radius=self.cutoff
-            )
-        return self._neigh
+        return self.structure.get_neighbors(
+            num_neighbors=None, cutoff_radius=self.cutoff
+        )
 
     @property
     def indices(self):
@@ -69,43 +68,33 @@ class SQSInteractive:
 
     @property
     def x_range(self):
-        if self._x_range is None:
-            self._x_range = np.linspace(
-                self.neigh.flattened.distances.min() - self.max_sigma * self.sigma,
-                self.neigh.flattened.distances.max() + self.max_sigma * self.sigma,
-                self.n_points
-            )
-        return self._x_range
+        return np.linspace(
+            self.neigh.flattened.distances.min() - self.max_sigma * self.sigma,
+            self.neigh.flattened.distances.max() + self.max_sigma * self.sigma,
+            self.n_points
+        )
 
     @property
     def prefactor(self):
-        if self._prefactor is None:
-            self._prefactor = 1 / np.sqrt(2 * np.pi * self.sigma**2) / np.sum(self.cond)
-        return self._prefactor
+        return 1 / np.sqrt(2 * np.pi * self.sigma**2) / np.sum(self.cond)
 
     @property
     def kappa(self):
-        if self._kappa is None:
-            x_diff = self.x_range[:, None] - self.neigh.flattened.distances[self.cond]
-            self._kappa = np.exp(
-                -x_diff**2 / (2 * self.sigma**2)
-            ) / self.x_range[:, None]**2
-        return self._kappa
+        x_diff = self.x_range[:, None] - self.neigh.flattened.distances[self.cond]
+        return np.exp(
+            -x_diff**2 / (2 * self.sigma**2)
+        ) / self.x_range[:, None]**2
 
     @property
     def histogram(self):
-        if self._histogram is None:
-            self._histogram = self.kappa.sum(axis=1) * self.prefactor
-        return self._histogram
+        return self.kappa.sum(axis=1) * self.prefactor
 
     @property
     def spins(self):
-        if self._spins is None:
-            self._spins = np.ones(len(self.structure) * self.n_copy).astype(int)
-            self._spins[:np.rint(len(self._spins) * self.concentration).astype(int)] *= -1
-            self._spins = self._spins.reshape(-1, self.n_copy).T
-            self._spins = np.array([np.random.permutation(ss) for ss in self._spins])
-        return self._spins
+        spins = np.ones(len(self.structure) * self.n_copy).astype(int)
+        spins[:np.rint(len(self._spins) * self.concentration).astype(int)] *= -1
+        spins = self._spins.reshape(-1, self.n_copy).T
+        return np.array([np.random.permutation(ss) for ss in self._spins])
 
     @property
     def s_histo(self):
@@ -121,9 +110,7 @@ class SQSInteractive:
 
     @property
     def sample_points(self):
-        if self._sample_points is None:
-            self._sample_points = self.kappa[self.histogram > self.min_sample_value]
-        return self._sample_points
+        return self.kappa[self.histogram > self.min_sample_value]
 
     def run_mc(self, n_steps=1000):
         current_value = np.inf
